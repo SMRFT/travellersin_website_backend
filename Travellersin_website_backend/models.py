@@ -1,0 +1,218 @@
+from django.db import models
+from django.contrib.auth.hashers import make_password, check_password
+# Create your models here.
+import uuid
+
+class Rooms(models.Model):
+    room_number = models.CharField(max_length=10, primary_key=True)
+    room_type = models.CharField(max_length=50)
+    size = models.CharField(max_length=50)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    bed_details = models.JSONField(default=dict)  
+    # example: {"size": "King", "type": "Single"}
+
+    amenities = models.JSONField(default=list)
+    # example: ["AC", "WiFi", "TV"]
+
+    about = models.TextField(blank=True)
+
+    images = models.JSONField(default=list)
+    # store GridFS file IDs as strings
+
+    offers = models.JSONField(default=dict, blank=True, null=True)
+    # example: {"discount_percent": 10, "description": "Weekday offer"}
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Room {self.room_number}"
+
+class Event(models.Model):
+    event_name = models.CharField(max_length=100)
+    size = models.CharField(max_length=50)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    amenities = models.JSONField(default=list)
+    about = models.TextField()
+
+    images = models.JSONField(default=list)
+    # GridFS file IDs
+
+    offers = models.JSONField(default=dict, blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.event_name
+
+class Query(models.Model):
+    STATUS_CHOICES = (
+        ("open", "Open"),
+        ("in_progress", "In Progress"),
+        ("resolved", "Resolved"),
+    )
+
+    query_id = models.CharField(max_length=20, primary_key=True, editable=False)
+    name = models.CharField(max_length=100)
+    email = models.EmailField(blank=True, null=True)
+    phone_number = models.CharField(max_length=15)
+    subject = models.CharField(max_length=150)
+    message = models.TextField()
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="open"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self.query_id:
+            self.query_id = f"QRY-{uuid.uuid4().hex[:8].upper()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.query_id} - {self.name} - {self.subject}"
+
+class Booking(models.Model):
+    booking_id = models.CharField(max_length=30, primary_key=True)
+
+    customer_id = models.CharField(max_length=100, blank=True, null=True)
+    guest_name = models.CharField(max_length=100, blank=True, null=True)
+    guest_phone = models.CharField(max_length=15, blank=True, null=True)
+    guest_email = models.EmailField(blank=True, null=True)
+
+    room_numbers = models.CharField(max_length=200, default="")  # Comma-separated: "101,102"
+    number_of_guests = models.PositiveIntegerField()
+
+    check_in = models.DateTimeField()
+    check_out = models.DateTimeField()
+
+    payment_details = models.JSONField(default=dict)
+
+    id_proof_type = models.CharField(max_length=50)
+    id_proof_file = models.CharField(max_length=100)
+
+    extra_addons = models.JSONField(default=list)
+
+    booking_status = models.CharField(
+        max_length=20,
+        default="pending"
+    )
+    cancellation_reason = models.TextField(blank=True, null=True)
+
+    # Razorpay Fields
+    razorpay_order_id = models.CharField(max_length=100, blank=True, null=True)
+    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)
+    razorpay_signature = models.CharField(max_length=255, blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    lastmodified_at = models.DateTimeField(auto_now=True)
+
+
+class Customer(models.Model):
+    customer_id = models.CharField(
+        max_length=20,
+        unique=True,
+        editable=False
+    )
+
+    name = models.CharField(max_length=100)
+    phone = models.CharField(max_length=15, unique=True)
+    email = models.EmailField(blank=True, null=True)  # NOT mandatory
+
+    password = models.CharField(max_length=255)  # hashed password
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self.customer_id:
+            self.customer_id = f"CUST-{uuid.uuid4().hex[:8].upper()}"
+
+        # 🔐 Hash password only if it is not already hashed
+        if not self.password.startswith("pbkdf2_"):
+            self.password = make_password(self.password)
+
+        super().save(*args, **kwargs)
+
+    def check_password(self, raw_password):
+        return check_password(raw_password, self.password)
+
+    def __str__(self):
+        return f"{self.customer_id} - {self.name}"
+
+class Admin(models.Model):
+    admin_id = models.CharField(
+        max_length=20,
+        unique=True,
+        editable=False
+    )
+
+    name = models.CharField(max_length=100)
+    phone = models.CharField(max_length=15, unique=True)
+    email = models.EmailField(blank=True, null=True)  # optional
+    password = models.CharField(max_length=255)
+
+    is_active = models.BooleanField(default=True)
+    is_superadmin = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self.admin_id:
+            self.admin_id = f"ADMIN-{uuid.uuid4().hex[:8].upper()}"
+
+        # 🔐 Hash password only once
+        if not self.password.startswith("pbkdf2_"):
+            self.password = make_password(self.password)
+
+        super().save(*args, **kwargs)
+
+    def check_password(self, raw_password):
+        return check_password(raw_password, self.password)
+
+    def __str__(self):
+        return f"{self.admin_id} - {self.name}"
+
+class CommunicationLog(models.Model):
+    booking_id = models.CharField(max_length=50, blank=True, null=True)
+    guest_name = models.CharField(max_length=100, blank=True, null=True)
+    type = models.CharField(max_length=20) # e.g., "WhatsApp", "Email"
+    recipient = models.CharField(max_length=100)
+    status = models.CharField(max_length=20) # e.g., "Success", "Failed"
+    details = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.type} to {self.recipient} - {self.status}"
+
+class EventBooking(models.Model):
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("confirmed", "Confirmed"),
+        ("cancelled", "Cancelled"),
+    )
+
+    booking_id = models.CharField(max_length=30, primary_key=True)
+    name = models.CharField(max_length=100)
+    phone = models.CharField(max_length=15)
+    email = models.EmailField(blank=True, null=True)
+    
+    event_type = models.CharField(max_length=100)
+    event_date = models.DateTimeField()
+    number_of_guests = models.PositiveIntegerField()
+    message = models.TextField(blank=True, null=True)
+    
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="pending"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.booking_id} - {self.name} - {self.event_type}"

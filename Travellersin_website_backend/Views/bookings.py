@@ -1,0 +1,70 @@
+from rest_framework.decorators import api_view
+from django.utils import timezone
+from datetime import timedelta
+from rest_framework.response import Response
+from Travellersin_website_backend.models import Booking
+from Travellersin_website_backend.serializers import BookingSerializer
+
+@api_view(["GET", "POST"])
+def bookings_list_create(request):
+    if request.method == "GET":
+        customer_id = request.query_params.get("customer_id")
+        if customer_id:
+            bookings = Booking.objects.filter(customer_id=customer_id).order_by("-created_at")
+        else:
+            bookings = Booking.objects.all().order_by("-created_at")
+        return Response(BookingSerializer(bookings, many=True).data)
+
+    if request.method == "POST":
+        serializer = BookingSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+@api_view(["GET", "PATCH"])
+def booking_detail_update(request, booking_id):
+    try:
+        booking = Booking.objects.get(booking_id=booking_id)
+    except Booking.DoesNotExist:
+        return Response({"error": "Booking not found"}, status=404)
+
+    if request.method == "GET":
+        return Response(BookingSerializer(booking).data)
+
+    if request.method == "PATCH":
+        serializer = BookingSerializer(booking, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=400)
+@api_view(["GET"])
+def track_booking(request):
+    booking_id = request.query_params.get("booking_id")
+    phone = request.query_params.get("phone")
+
+    if not booking_id or not phone:
+        return Response({"error": "Both Booking ID and Phone number are required"}, status=400)
+
+    try:
+        # Search by booking_id and guest_phone
+        booking = Booking.objects.get(booking_id=booking_id, guest_phone=phone)
+        return Response(BookingSerializer(booking).data)
+    except Booking.DoesNotExist:
+        return Response({"error": "No booking found with these details"}, status=404)
+@api_view(["POST"])
+def cancel_booking(request, booking_id):
+    try:
+        booking = Booking.objects.get(booking_id=booking_id)
+    except Booking.DoesNotExist:
+        return Response({"error": "Booking not found"}, status=404)
+
+    # Policy: Within 24 hours of booking creation
+    if timezone.now() > booking.created_at + timedelta(hours=24):
+        return Response({"error": "Cancellation window (24h from booking) has expired"}, status=400)
+
+    reason = request.data.get("reason", "Cancelled by guest")
+    booking.booking_status = "cancellation_requested"
+    booking.cancellation_reason = reason
+    booking.save()
+    return Response({"message": "Cancellation request submitted for admin approval", "booking": BookingSerializer(booking).data})
