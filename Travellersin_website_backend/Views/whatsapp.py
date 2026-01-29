@@ -1,7 +1,7 @@
 import requests
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from ..models import Booking, CommunicationLog
+from ..models import Booking, CommunicationLog, EventBooking
 from django.utils import timezone
 
 def send_booking_confirmation(booking):
@@ -9,7 +9,7 @@ def send_booking_confirmation(booking):
     Utility function to send WhatsApp confirmation using Botify API
     """
     try:
-        api_key = "ccbb8c923474d5b9d605b391f545a5688fbd54e0cad69d17"
+        api_key = ""
         botify_url = "https://dashboard.botify.in/api/v1/external/sendtemplatemessage"
         
         phone = str(booking.guest_phone).strip()
@@ -72,6 +72,83 @@ def send_booking_confirmation(booking):
                 guest_name=booking.guest_name,
                 type="WhatsApp",
                 recipient=str(booking.guest_phone),
+                status="Failed",
+                details=str(e)
+            )
+        except:
+            pass
+        return False
+
+def send_event_confirmation(booking):
+    """
+    Utility function to send WhatsApp confirmation for Event Bookings using Botify API
+    """
+    try:
+        api_key = ""
+        botify_url = "https://dashboard.botify.in/api/v1/external/sendtemplatemessage"
+        
+        phone = str(booking.phone).strip()
+        if not phone.startswith("91") and len(phone) == 10:
+            phone = f"91{phone}"
+            
+        # Template variables order:
+        # 1. {{name}}
+        # 2. {{booking_id}}
+        # 3. {{event_type}}
+        # 4. {{event_date}}
+        # 5. {{number_of_guests}}
+        # 6. {{phone}}
+        # 7. {{status}}
+        
+        template_params_list = [
+            booking.name or "Valued Guest",
+            booking.booking_id,
+            booking.event_type,
+            booking.event_date.strftime('%d-%m-%Y %I:%M %p'),
+            booking.number_of_guests,
+            booking.phone or "N/A",
+            booking.status.upper()
+        ]
+        
+        template_params = ",".join([str(p) for p in template_params_list])
+        
+        params = {
+            "apikey": api_key,
+            "contact": phone,
+            "template": "travellersin_event",
+            "params": template_params,
+        }
+        
+        r = requests.get(botify_url, params=params, timeout=20)
+        
+        try:
+            response_json = r.json()
+            is_success = r.status_code == 200 and response_json.get("success") is True
+        except ValueError:
+            response_json = {}
+            is_success = False
+            
+        status = "Success" if is_success else "Failed"
+        
+        # Log communication
+        CommunicationLog.objects.create(
+            booking_id=booking.booking_id,
+            guest_name=booking.name,
+            type="WhatsApp",
+            recipient=phone,
+            status=status,
+            details=r.text
+        )
+        
+        return is_success
+    except Exception as e:
+        print(f"WhatsApp Error: {str(e)}")
+        try:
+            CommunicationLog.objects.create(
+                booking_id=booking.booking_id,
+                guest_name=booking.name,
+                type="WhatsApp",
+                recipient=str(booking.phone),
                 status="Failed",
                 details=str(e)
             )

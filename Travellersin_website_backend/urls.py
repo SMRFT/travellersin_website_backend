@@ -3,7 +3,12 @@ from .Views.rooms import rooms_list_create, room_detail_update, check_room_avail
 from .Views.events import events_list_create, event_detail_update
 from .Views.queries import queries_list_create, query_detail_update
 from .Views.bookings import bookings_list_create, booking_detail_update, track_booking, cancel_booking
-from .Views.adminpanel import admin_dashboard, update_booking_status, admin_list_create, admin_detail_update, admin_soft_delete, approve_cancellation, reject_cancellation, update_event_booking_status
+from .Views.adminpanel import (
+    admin_dashboard, update_booking_status, admin_list_create, 
+    admin_detail_update, admin_soft_delete, approve_cancellation, 
+    reject_cancellation, update_event_booking_status, 
+    admin_room_availability, billing_history
+)
 from .Views.auth import customer_signup, customer_login, admin_login, get_user_profile
 from .Views.payments import create_razorpay_order, verify_payment, confirm_cash_booking, initiate_booking_payment
 from .Views.media import upload_room_image, serve_gridfs_file
@@ -36,10 +41,12 @@ urlpatterns = [
 
     # Admin
     path("admin/dashboard/", admin_dashboard),
+    path("admin/room-availability/", admin_room_availability),
     path("admin/booking/<str:booking_id>/", update_booking_status),
     path("admin/event-booking/<str:booking_id>/", update_event_booking_status),
     path("admin/booking/<str:booking_id>/approve-cancellation/", approve_cancellation),
     path("admin/booking/<str:booking_id>/reject-cancellation/", reject_cancellation),
+    path("admin/billing-history/", billing_history),
     path("admin/", admin_list_create),                     # GET, POST
     path("admin/<str:admin_id>/", admin_detail_update),    # GET, PATCH
     path("admin/<str:admin_id>/delete/", admin_soft_delete),

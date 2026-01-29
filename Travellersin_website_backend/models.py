@@ -102,6 +102,12 @@ class Booking(models.Model):
         max_length=20,
         default="pending"
     )
+    
+    booking_source = models.CharField(
+        max_length=20,
+        default="online" # "online" or "manual"
+    )
+    
     cancellation_reason = models.TextField(blank=True, null=True)
 
     # Razorpay Fields
@@ -216,3 +222,16 @@ class EventBooking(models.Model):
 
     def __str__(self):
         return f"{self.booking_id} - {self.name} - {self.event_type}"
+
+class Billing(models.Model):
+    billing_no = models.CharField(max_length=50, primary_key=True)
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='bills')
+    
+    amount_paid = models.FloatField()
+    total_amount = models.FloatField()
+    payment_type = models.CharField(max_length=20, default='cash')
+    
+    created_date = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.billing_no} - {self.booking.booking_id}"

@@ -8,6 +8,22 @@ from Travellersin_website_backend.serializers import QuerySerializer
 def queries_list_create(request):
     if request.method == "GET":
         queries = Query.objects.all().order_by("-created_at")
+        
+        # Date Filter
+        start_date_str = request.query_params.get('start_date')
+        end_date_str = request.query_params.get('end_date')
+        
+        if start_date_str and end_date_str:
+            try:
+                from datetime import datetime
+                start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+                end_dt = end_dt.replace(hour=23, minute=59, second=59)
+                
+                queries = queries.filter(created_at__range=[start_dt, end_dt])
+            except Exception as e:
+                print(f"Date filter error: {e}")
+                
         return Response(QuerySerializer(queries, many=True).data)
 
     if request.method == "POST":

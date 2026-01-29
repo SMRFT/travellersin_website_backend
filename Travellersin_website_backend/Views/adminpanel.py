@@ -1,8 +1,9 @@
+from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from Travellersin_website_backend.models import Admin, Booking, Query, EventBooking
-from Travellersin_website_backend.serializers import AdminSerializer, BookingSerializer, EventBookingSerializer
-from .whatsapp import send_booking_confirmation
+from Travellersin_website_backend.models import Admin, Booking, Query, EventBooking, Rooms, Billing
+from Travellersin_website_backend.serializers import AdminSerializer, BookingSerializer, EventBookingSerializer, BillingSerializer
+from .whatsapp import send_booking_confirmation, send_event_confirmation
 
 @api_view(["GET", "POST"])
 def admin_list_create(request):
@@ -12,7 +13,8 @@ def admin_list_create(request):
     """
 
     if request.method == "GET":
-        admins = Admin.objects.filter(is_active=True)
+        # Djongo fix: Filter in Python to avoid SQLDecodeError on boolean fields
+        admins = [a for a in Admin.objects.all() if a.is_active]
         serializer = AdminSerializer(admins, many=True)
         return Response(serializer.data)
 
@@ -33,7 +35,9 @@ def admin_detail_update(request, admin_id):
     PATCH -> Update admin details
     """
     try:
-        admin = Admin.objects.get(admin_id=admin_id, is_active=True)
+        admin = Admin.objects.get(admin_id=admin_id)
+        if not admin.is_active:
+            raise Admin.DoesNotExist
     except Admin.DoesNotExist:
         return Response(
             {"error": "Admin not found"},
@@ -98,6 +102,15 @@ def update_booking_status(request, booking_id):
     
     if status_val == "cancelled":
         booking.cancellation_reason = request.data.get("cancellation_reason", "Cancelled by Admin")
+    
+    # 3. Update Dates (New Feature)
+    new_check_in = request.data.get("check_in")
+    new_check_out = request.data.get("check_out")
+    if new_check_in:
+        booking.check_in = new_check_in
+    if new_check_out:
+        booking.check_out = new_check_out
+
     # 2. Handle Payment Details
     payment_details = booking.payment_details or {}
     # If it's an empty dict, initialize defaults
@@ -118,6 +131,41 @@ def update_booking_status(request, booking_id):
             updated_paid = current_paid + amount_to_add
             payment_details["amount_paid"] = updated_paid
             
+            # --- Billing Logic Start ---
+            # Generate Billing Record for this transaction
+            import uuid
+            from django.utils import timezone
+            
+            if amount_to_add > 0:
+                billing_no = f"BILL-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+                
+                # Determine payment type (default to cash if not provided, or infer from payment_status)
+                # If explicit 'payment_type' is sent in body
+                p_type = request.data.get("payment_type", "cash")
+                
+                # Create Billing Model Entry (The source of truth)
+                try:
+                    Billing.objects.create(
+                        billing_no=billing_no,
+                        booking=booking,
+                        amount_paid=amount_to_add,
+                        total_amount=total_amount,
+                        payment_type=p_type
+                    )
+                except Exception as e:
+                    print(f"Error creating billing record: {e}")
+                
+                # Store ONLY the billing_no in booking payment_details
+                if "billing_numbers" not in payment_details:
+                    payment_details["billing_numbers"] = []
+                
+                # Append just the string
+                payment_details["billing_numbers"].append(billing_no)
+                
+                # Also set latest billing_no at top level
+                payment_details["latest_billing_no"] = billing_no
+            # --- Billing Logic End ---
+
             # Auto-calculate status
             if updated_paid >= total_amount:
                 payment_details["status"] = "paid"
@@ -176,9 +224,133 @@ def update_event_booking_status(request, booking_id):
         booking = EventBooking.objects.get(booking_id=booking_id)
         new_status = request.data.get('status')
         if new_status:
+            old_status = booking.status
             booking.status = new_status
             booking.save()
+            
+            # If status changed to confirmed, send WhatsApp
+            if new_status == 'confirmed' and old_status != 'confirmed':
+                try:
+                    send_event_confirmation(booking)
+                except Exception as e:
+                    print(f"WhatsApp notification failed: {e}")
+                    
             return Response({"success": True, "status": booking.status})
         return Response({"error": "Status is required"}, status=status.HTTP_400_BAD_REQUEST)
     except EventBooking.DoesNotExist:
         return Response({"error": "Booking not found"}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(["GET"])
+def admin_room_availability(request):
+    """
+    GET -> Get availability for all rooms for a specific date
+    """
+    date_str = request.query_params.get("date")
+    if not date_str:
+        return Response({"error": "Date parameter is required"}, status=400)
+
+    try:
+        from django.utils.dateparse import parse_datetime
+        from django.utils.timezone import make_aware, is_aware
+        import datetime
+
+        target_time = parse_datetime(date_str)
+        if not target_time:
+            # Fallback to date if it's just a date
+            from django.utils.dateparse import parse_date
+            d = parse_date(date_str)
+            if d:
+                target_time = datetime.datetime.combine(d, datetime.time.min)
+            else:
+                return Response({"error": "Invalid datetime format. Use ISO format or YYYY-MM-DD"}, status=400)
+
+        # Ensure timezone awareness if settings specify
+        if not is_aware(target_time):
+            target_time = make_aware(target_time)
+        
+        rooms = Rooms.objects.all()
+        # Active bookings for this precise moment (overlap check)
+        # check_in <= target_time < check_out
+        active_bookings = Booking.objects.filter(
+            check_in__lte=target_time,
+            check_out__gt=target_time,
+            booking_status__in=["confirmed", "pending"]
+        )
+
+        availability_data = []
+
+        for room in rooms:
+            # Find if this room is in any active booking
+            room_booking = None
+            for b in active_bookings:
+                # Room numbers are comma separated: "101,102"
+                booked_rooms = [r.strip() for r in b.room_numbers.split(",") if r.strip()]
+                if room.room_number in booked_rooms:
+                    room_booking = b
+                    break
+            
+            status_val = "available"
+            booking_details = None
+            
+            if room_booking:
+                status_val = room_booking.booking_status
+                booking_details = {
+                    "booking_id": room_booking.booking_id,
+                    "guest_name": room_booking.guest_name,
+                    "check_in": room_booking.check_in,
+                    "check_out": room_booking.check_out,
+                }
+            
+            availability_data.append({
+                "room_number": room.room_number,
+                "room_type": room.room_type,
+                "status": status_val,
+                "booking_details": booking_details
+            })
+
+        return Response(availability_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=400)
+
+@api_view(["GET"])
+def billing_history(request):
+    """
+    GET -> List bills. Supports filtering by ?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+    """
+    try:
+        start_date_str = request.query_params.get('start_date')
+        end_date_str = request.query_params.get('end_date')
+
+        bills = Billing.objects.all().order_by('-created_date')
+
+        if start_date_str and end_date_str:
+            # Parse dates
+            from django.utils.dateparse import parse_date
+            import datetime
+            from django.utils import timezone
+
+            start_date = parse_date(start_date_str)
+            end_date = parse_date(end_date_str)
+
+            if start_date and end_date:
+                # Combine with min/max time
+                # Make them timezone aware if strictly required, but simple approach:
+                # Create naive datetime and make aware if USE_TZ=True
+                min_time = datetime.time.min
+                max_time = datetime.time.max
+                
+                start_dt = datetime.datetime.combine(start_date, min_time)
+                end_dt = datetime.datetime.combine(end_date, max_time)
+                
+                # Make aware
+                start_dt = timezone.make_aware(start_dt)
+                end_dt = timezone.make_aware(end_dt)
+                
+                bills = bills.filter(created_date__range=[start_dt, end_dt])
+
+        serializer = BillingSerializer(bills, many=True)
+        return Response(serializer.data)
+    except Exception as e:
+        print(f"Billing Filter Error: {e}") # Log it
+        return Response({"error": str(e)}, status=500)

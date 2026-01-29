@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import Rooms, Event, Query, Booking, Customer, Admin, EventBooking
+from .models import Rooms, Event, Query, Booking, Customer, Admin, EventBooking, Billing
+from django.db.models import Sum
 
 class RoomSerializer(serializers.ModelSerializer):
     id = serializers.SerializerMethodField()
@@ -89,6 +90,10 @@ class BookingSerializer(serializers.ModelSerializer):
                 booking_status__in=["confirmed", "pending"]
             )
 
+            # 🛠️ EXCLUDE CURRENT BOOKING (For updates)
+            if self.instance:
+                overlapping = overlapping.exclude(pk=self.instance.pk)
+
             if overlapping.exists():
                 raise serializers.ValidationError(f"Room {room_no} already booked for this date range")
 
@@ -154,3 +159,30 @@ class EventBookingSerializer(serializers.ModelSerializer):
         if 'booking_id' not in validated_data or not validated_data['booking_id']:
             validated_data['booking_id'] = f"EVT-{uuid.uuid4().hex[:8].upper()}"
         return super().create(validated_data)
+
+class BillingSerializer(serializers.ModelSerializer):
+    total_booking_paid = serializers.SerializerMethodField()
+    guest_name = serializers.SerializerMethodField()
+    guest_phone = serializers.SerializerMethodField()
+    guest_email = serializers.SerializerMethodField()
+    room_numbers = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Billing
+        fields = "__all__"
+
+    def get_total_booking_paid(self, obj):
+        # Sum of all bills linked to this booking
+        return obj.booking.bills.aggregate(total=Sum('amount_paid'))['total'] or 0
+
+    def get_guest_name(self, obj):
+        return obj.booking.guest_name
+
+    def get_guest_phone(self, obj):
+        return obj.booking.guest_phone
+
+    def get_guest_email(self, obj):
+        return obj.booking.guest_email
+    
+    def get_room_numbers(self, obj):
+        return obj.booking.room_numbers
