@@ -27,7 +27,7 @@ SECRET_KEY = 'django-insecure-lrbwaxez&q_!zk!xed7-*cx1d12%qwjaqshyorci3*)8$8r00v
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['103.205.141.149','node221456-env-5683222.in1.cloudlets.co.in','env-5683222.in1.cloudlets.co.in','127.0.0.1','test.shinova.in']
+ALLOWED_HOSTS = ['103.205.141.149','node221456-env-5683222.in1.cloudlets.co.in','env-5683222.in1.cloudlets.co.in','127.0.0.1','test.shinova.in', 'localhost']
 
 
 # Application definition
@@ -106,7 +106,7 @@ import certifi
 DATABASES = {
     'default': {
         'ENGINE': 'djongo',
-        'NAME': os.getenv("GLOBAL_DB_NAME"),
+        'NAME': os.getenv("TIWEB_DB_NAME"),
         'ENFORCE_SCHEMA': False,
         'CLIENT': {
             'host': os.getenv("GLOBAL_DB_HOST"),

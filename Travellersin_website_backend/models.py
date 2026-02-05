@@ -102,12 +102,13 @@ class Booking(models.Model):
         max_length=20,
         default="pending"
     )
+    
+    booking_source = models.CharField(
+        max_length=20,
+        default="online" # "online" or "manual"
+    )
+    
     cancellation_reason = models.TextField(blank=True, null=True)
-
-    # Razorpay Fields
-    razorpay_order_id = models.CharField(max_length=100, blank=True, null=True)
-    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)
-    razorpay_signature = models.CharField(max_length=255, blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     lastmodified_at = models.DateTimeField(auto_now=True)
@@ -216,3 +217,24 @@ class EventBooking(models.Model):
 
     def __str__(self):
         return f"{self.booking_id} - {self.name} - {self.event_type}"
+
+class Billing(models.Model):
+    billing_no = models.CharField(max_length=50, primary_key=True)
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='bills')
+    
+    amount_paid = models.FloatField()
+    total_amount = models.FloatField()
+    payment_type = models.CharField(max_length=20, default='cash')
+
+    transaction_id = models.CharField(max_length=100, blank=True, null=True)
+
+    payment_gateway_ref_id = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(max_length=20, default="success")
+
+    # Razorpay Fields
+    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)
+    
+    created_date = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.billing_no} - {self.booking.booking_id}"
