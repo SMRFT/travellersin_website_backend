@@ -145,6 +145,11 @@ class Customer(models.Model):
     def __str__(self):
         return f"{self.customer_id} - {self.name}"
 
+    @property
+    def is_authenticated(self):
+        return True
+
+
 class Admin(models.Model):
     admin_id = models.CharField(
         max_length=20,
@@ -177,6 +182,10 @@ class Admin(models.Model):
 
     def __str__(self):
         return f"{self.admin_id} - {self.name}"
+
+    @property
+    def is_authenticated(self):
+        return True
 
 class CommunicationLog(models.Model):
     booking_id = models.CharField(max_length=50, blank=True, null=True)

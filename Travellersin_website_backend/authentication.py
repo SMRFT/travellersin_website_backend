@@ -20,7 +20,7 @@ class CustomJWTAuthentication(JWTAuthentication):
                 # If no user_type is present, maybe it's a legacy token or unrelated?
                 raise AuthenticationFailed('Token missing user_type claim', code='user_not_found')
 
-            if not user.is_active if hasattr(user, 'is_active') else True:
+            if hasattr(user, 'is_active') and not user.is_active:
                  raise AuthenticationFailed('User is inactive', code='user_inactive')
 
             return user
