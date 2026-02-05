@@ -8,7 +8,7 @@ import dotenv
 def main():
     """Run administrative tasks."""
     dotenv.load_dotenv()
-    environment = os.getenv('ENVIRONMENT', 'dev')
+    environment = os.getenv('ENV_CLASSIFICATION', 'dev')
     if environment == 'prod':
         os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'travellerin_backend.settings-prod')
     elif environment == 'test':
