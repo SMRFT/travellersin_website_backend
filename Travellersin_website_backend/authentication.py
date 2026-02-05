@@ -1,28 +1,31 @@
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework.exceptions import AuthenticationFailed
-from .models import Customer, Admin
+from rest_framework_simplejwt.exceptions import InvalidToken, AuthenticationFailed
+from .models import Admin, Customer
 
-class MultiModelJWTAuthentication(JWTAuthentication):
+class CustomJWTAuthentication(JWTAuthentication):
     def get_user(self, validated_token):
         """
-        Custom logic to fetch user from either Customer or Admin tables
-        based on the user_type claim in the token.
+        Attempts to find and return a user using the given validated token.
         """
-        user_id = validated_token.get('user_id')
-        user_type = validated_token.get('user_type')
+        try:
+            user_type = validated_token.get('user_type')
+            user_id = validated_token.get('user_id')
 
-        if not user_id or not user_type:
-            return None
+            if user_type == 'admin':
+                user = Admin.objects.get(id=user_id)
+            elif user_type == 'customer':
+                user = Customer.objects.get(id=user_id)
+            else:
+                # Fallback or strict failure
+                # If no user_type is present, maybe it's a legacy token or unrelated?
+                raise AuthenticationFailed('Token missing user_type claim', code='user_not_found')
 
-        if user_type == 'customer':
-            try:
-                return Customer.objects.get(id=user_id)
-            except Customer.DoesNotExist:
-                return None
-        elif user_type == 'admin':
-            try:
-                return Admin.objects.get(id=user_id)
-            except Admin.DoesNotExist:
-                return None
-        
-        return None
+            if not user.is_active if hasattr(user, 'is_active') else True:
+                 raise AuthenticationFailed('User is inactive', code='user_inactive')
+
+            return user
+
+        except (Admin.DoesNotExist, Customer.DoesNotExist):
+            raise AuthenticationFailed('User not found', code='user_not_found')
+        except Exception as e:
+            raise AuthenticationFailed(str(e), code='authentication_failed')
