@@ -110,11 +110,6 @@ class Booking(models.Model):
     
     cancellation_reason = models.TextField(blank=True, null=True)
 
-    # Razorpay Fields
-    razorpay_order_id = models.CharField(max_length=100, blank=True, null=True)
-    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)
-    razorpay_signature = models.CharField(max_length=255, blank=True, null=True)
-
     created_at = models.DateTimeField(auto_now_add=True)
     lastmodified_at = models.DateTimeField(auto_now=True)
 
@@ -230,6 +225,14 @@ class Billing(models.Model):
     amount_paid = models.FloatField()
     total_amount = models.FloatField()
     payment_type = models.CharField(max_length=20, default='cash')
+
+    transaction_id = models.CharField(max_length=100, blank=True, null=True)
+
+    payment_gateway_ref_id = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(max_length=20, default="success")
+
+    # Razorpay Fields
+    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)
     
     created_date = models.DateTimeField(auto_now_add=True)
 

@@ -35,6 +35,7 @@ class BookingSerializer(serializers.ModelSerializer):
     customer_id = serializers.CharField(max_length=100, required=False, allow_null=True)
     # room_numbers will be handled as a string in the model but we accept list/string in serializer
     room_numbers = serializers.JSONField(required=True)
+    bills = serializers.SerializerMethodField()
     
     class Meta:
         model = Booking
@@ -43,6 +44,24 @@ class BookingSerializer(serializers.ModelSerializer):
 
     def get_id(self, obj):
         return str(obj.pk)
+
+    def get_bills(self, obj):
+        # Local import to avoid circular dependency/ordering issues
+        from .serializers import BillingSerializer 
+        # But wait, we are IN serializers.py, so we can't import from .serializers if class isn't defined yet.
+        # We need to access the model reverse relation. 
+        # Since BillingSerializer is defined BELOW, we can't use it directly here unless we move it UP.
+        # Strategy: Define a simple inline serializer or move BillingSerializer UP.
+        # Moving BillingSerializer UP is better.
+        # For now, let's use a simple manual dict construction to avoid huge diff of moving class.
+        return [{
+            "billing_no": b.billing_no,
+            "amount_paid": b.amount_paid,
+            "payment_type": b.payment_type,
+            "status": b.status,
+            "transaction_id": b.transaction_id,
+            "date": b.created_date
+        } for b in obj.bills.all().order_by('-created_date')]
 
     def create(self, validated_data):
         import uuid
@@ -172,17 +191,32 @@ class BillingSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def get_total_booking_paid(self, obj):
-        # Sum of all bills linked to this booking
-        return obj.booking.bills.aggregate(total=Sum('amount_paid'))['total'] or 0
+        try:
+            # Sum of all bills linked to this booking
+            return obj.booking.bills.aggregate(total=Sum('amount_paid'))['total'] or 0
+        except Exception:
+            return 0
 
     def get_guest_name(self, obj):
-        return obj.booking.guest_name
+        try:
+            return obj.booking.guest_name
+        except Exception:
+            return "Deleted Booking"
 
     def get_guest_phone(self, obj):
-        return obj.booking.guest_phone
+        try:
+            return obj.booking.guest_phone
+        except Exception:
+            return "N/A"
 
     def get_guest_email(self, obj):
-        return obj.booking.guest_email
+        try:
+            return obj.booking.guest_email
+        except Exception:
+            return "N/A"
     
     def get_room_numbers(self, obj):
-        return obj.booking.room_numbers
+        try:
+            return obj.booking.room_numbers
+        except Exception:
+            return "N/A"

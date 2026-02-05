@@ -137,7 +137,13 @@ def update_booking_status(request, booking_id):
             from django.utils import timezone
             
             if amount_to_add > 0:
-                billing_no = f"BILL-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+                # billing_no = f"BILL-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+                
+                # Use REF format
+                import time
+                t_str = str(int(time.time() * 1000))
+                r_str = uuid.uuid4().hex[:8].upper()
+                billing_no = f"REF_{t_str}_{r_str}"
                 
                 # Determine payment type (default to cash if not provided, or infer from payment_status)
                 # If explicit 'payment_type' is sent in body
@@ -192,6 +198,12 @@ def update_booking_status(request, booking_id):
 
     return Response({"message": "Booking updated successfully", "booking": BookingSerializer(booking).data})
 
+import razorpay
+import os
+
+# Initialize Razorpay Client (Ensure keys are loaded from settings/env)
+client = razorpay.Client(auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET")))
+
 @api_view(["POST"])
 def approve_cancellation(request, booking_id):
     try:
@@ -199,9 +211,57 @@ def approve_cancellation(request, booking_id):
         if booking.booking_status != "cancellation_requested":
             return Response({"error": "No cancellation request found for this booking"}, status=400)
         
+        # Calculate Refund
+        payment_details = booking.payment_details or {}
+        amount_paid = float(payment_details.get("amount_paid", 0))
+        refund_amount = 0
+        fine_amount = 0
+        
+        if amount_paid > 0:
+            # 15% Cancellation Fine
+            fine_amount = amount_paid * 0.15
+            refund_amount = amount_paid - fine_amount
+            
+            # Initiate Razorpay Refund if applicable
+            rzp_payment_id = booking.razorpay_payment_id
+            refund_id = None
+            refund_status = "pending"
+            
+            if rzp_payment_id and payment_details.get("method") == "razorpay":
+                try:
+                    # Razorpay expects amount in paise
+                    refund_data = {
+                        "amount": int(refund_amount * 100),
+                        "speed": "normal",
+                        "notes": {
+                            "booking_id": booking_id,
+                            "reason": "Cancellation Refund (15% Fine Deducted)"
+                        }
+                    }
+                    refund = client.payment.refund(rzp_payment_id, refund_data)
+                    refund_id = refund.get("id")
+                    refund_status = refund.get("status")
+                    
+                except Exception as e:
+                    print(f"Razorpay Refund Failed: {e}")
+                    refund_status = "failed"
+            
+            # Update Payment Details with Refund Info
+            payment_details["refund_amount"] = refund_amount
+            payment_details["cancellation_fine"] = fine_amount
+            payment_details["refund_id"] = refund_id
+            payment_details["refund_status"] = refund_status
+            payment_details["status"] = "refunded" if refund_status == "processed" else "refund_pending"
+            
+            booking.payment_details = payment_details
+
         booking.booking_status = "cancelled"
         booking.save()
-        return Response({"message": "Cancellation approved", "booking": BookingSerializer(booking).data})
+        
+        return Response({
+            "message": f"Cancellation approved. Refund initiated: ₹{refund_amount} (Fine: ₹{fine_amount})", 
+            "booking": BookingSerializer(booking).data
+        })
     except Booking.DoesNotExist:
         return Response({"error": "Booking not found"}, status=404)
 
@@ -324,6 +384,25 @@ def billing_history(request):
 
         bills = Billing.objects.all().order_by('-created_date')
 
+        if start_date_str and end_date_str:
+            # Parse dates
+            from django.utils.dateparse import parse_date
+            import datetime
+            from django.utils import timezone
+
+            start_date = parse_date(start_date_str)
+            end_date = parse_date(end_date_str)
+
+            if start_date and end_date:
+                # Combine with min/max time
+                # Make them timezone aware if strictly required, but simple approach:
+                # Create naive datetime and make aware if USE_TZ=True
+                min_time = datetime.time.min
+                max_time = datetime.time.max
+                
+                start_dt = datetime.datetime.combine(start_date, min_time)
+                end_dt = datetime.datetime.combine(end_date, max_time)
+                
         if start_date_str and end_date_str:
             # Parse dates
             from django.utils.dateparse import parse_date
