@@ -26,7 +26,7 @@ urlpatterns = [
     # Events
     path("events/", events_list_create),
     path("events/bookings/", event_bookings_list_create),
-    path("events/track/", track_event_booking),
+    path("events/status/", track_event_booking),
     path("events/<int:pk>/", event_detail_update),
 
     # Queries
