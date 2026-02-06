@@ -35,6 +35,7 @@ class BookingSerializer(serializers.ModelSerializer):
     customer_id = serializers.CharField(max_length=100, required=False, allow_null=True)
     # room_numbers will be handled as a string in the model but we accept list/string in serializer
     room_numbers = serializers.JSONField(required=True)
+    discount_amount = serializers.FloatField(required=False, default=0.0)
     bills = serializers.SerializerMethodField()
     
     class Meta:
@@ -69,13 +70,22 @@ class BookingSerializer(serializers.ModelSerializer):
             validated_data['booking_id'] = f"BK-{uuid.uuid4().hex[:8].upper()}"
         
         # Convert list to comma-separated string for model storage
-        if isinstance(validated_data.get('room_numbers'), list):
+        room_nums = validated_data.get('room_numbers')
+        if isinstance(room_nums, list):
             # Ensure all items are strings and filter out None
-            clean_rooms = [str(r) for r in validated_data['room_numbers'] if r is not None]
-            # Using delimiters for safer searching: ,101,102,
+            clean_rooms = [str(r) for r in room_nums if r is not None]
             validated_data['room_numbers'] = "," + ",".join(clean_rooms) + ","
+        elif isinstance(room_nums, str):
+            # If it's already a string, ensure it has wrapping commas
+            cleaned = room_nums.strip(',')
+            if cleaned:
+                validated_data['room_numbers'] = f",{cleaned},"
+            else:
+                validated_data['room_numbers'] = ""
             
         return super().create(validated_data)
+
+
 
     def validate(self, data):
         """

@@ -93,8 +93,9 @@ class Booking(models.Model):
 
     payment_details = models.JSONField(default=dict)
 
-    id_proof_type = models.CharField(max_length=50)
-    id_proof_file = models.CharField(max_length=100)
+    id_proof_type = models.CharField(max_length=50, blank=True, null=True)
+    id_proof_number = models.CharField(max_length=50, blank=True, null=True)
+    id_proof_file = models.CharField(max_length=100, blank=True, null=True)
 
     extra_addons = models.JSONField(default=list)
 
@@ -110,8 +111,44 @@ class Booking(models.Model):
     
     cancellation_reason = models.TextField(blank=True, null=True)
 
+    discount_amount = models.FloatField(default=0.0)
+
     created_at = models.DateTimeField(auto_now_add=True)
     lastmodified_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        # Enforce Payment Status Consistency
+        if self.payment_details:
+            try:
+                # Ensure we are working with a dict
+                if isinstance(self.payment_details, str):
+                    import json
+                    self.payment_details = json.loads(self.payment_details)
+                
+                p_details = self.payment_details
+                total = float(p_details.get('amount', 0))
+                paid = float(p_details.get('amount_paid', 0))
+                discount = float(self.discount_amount or 0)
+                
+                net_payable = total - discount
+                # Avoid negative net payable
+                if net_payable < 0: net_payable = 0
+                
+                # Determine status
+                new_status = 'pending'
+                if paid >= net_payable:
+                    new_status = 'paid'
+                elif paid > 0:
+                    new_status = 'partially_paid'
+                
+                # Update status in payment_details
+                p_details['status'] = new_status
+                self.payment_details = p_details
+            except (ValueError, TypeError, ImportError):
+                # If JSON parsing fails or types are wrong, skip validation to avoid breaking save
+                pass
+        
+        super().save(*args, **kwargs)
 
 
 class Customer(models.Model):
