@@ -12,9 +12,9 @@ class CustomJWTAuthentication(JWTAuthentication):
             user_id = validated_token.get('user_id')
 
             if user_type == 'admin':
-                user = Admin.objects.get(id=user_id)
+                user = Admin.objects.get(admin_id=user_id)
             elif user_type == 'customer':
-                user = Customer.objects.get(id=user_id)
+                user = Customer.objects.get(customer_id=user_id)
             else:
                 # Fallback or strict failure
                 # If no user_type is present, maybe it's a legacy token or unrelated?

@@ -1,5 +1,5 @@
 from django.urls import path
-from .Views.rooms import rooms_list_create, room_detail_update, check_room_availability
+from .Views.rooms import rooms_list_create, room_detail_update, check_room_availability, get_room_bookings
 from .Views.events import events_list_create, event_detail_update
 from .Views.queries import queries_list_create, query_detail_update
 from .Views.bookings import bookings_list_create, booking_detail_update, track_booking, cancel_booking
@@ -9,7 +9,7 @@ from .Views.adminpanel import (
     reject_cancellation, update_event_booking_status, 
     admin_room_availability, billing_history
 )
-from .Views.auth import customer_signup, customer_login, admin_login, get_user_profile
+from .Views.auth import customer_signup, customer_login, admin_login, get_user_profile, google_auth, update_user_profile
 from .Views.payments import create_razorpay_order, verify_payment, confirm_cash_booking, initiate_booking_payment
 from .Views.media import upload_room_image, serve_gridfs_file
 from .Views.whatsapp import send_whatsapp_test
@@ -21,6 +21,7 @@ urlpatterns = [
     # Rooms
     path("rooms/", rooms_list_create),
     path("rooms/check-availability/", check_room_availability),
+    path("rooms/<str:room_number>/bookings/", get_room_bookings),
     path("rooms/<str:room_number>/", room_detail_update),
 
     # Events
@@ -56,6 +57,8 @@ urlpatterns = [
     path("auth/login/", customer_login),
     path("auth/admin/login/", admin_login),
     path("auth/profile/", get_user_profile),
+    path("auth/profile/update/", update_user_profile),
+    path("auth/google/", google_auth),
 
     # Payments
     path("payments/create-order/", create_razorpay_order),
