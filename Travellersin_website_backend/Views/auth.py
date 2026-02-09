@@ -1,117 +1,270 @@
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.hashers import check_password
 from ..models import Customer, Admin
 from ..serializers import CustomerSerializer, AdminSerializer
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+import requests
+import os
+import uuid
 
-def get_tokens_for_user(user, user_type):
+# Helper to generate tokens
+def get_tokens_for_user(user, user_type='customer'):
     refresh = RefreshToken.for_user(user)
-    # Custom claims to identify user type and ID
-    refresh['user_type'] = user_type
-    # Numeric PK for system compatibility
-    refresh['user_id'] = user.id
-    # String ID for display/profile
-    refresh['custom_id'] = getattr(user, f"{user_type}_id")
     
+    # Add custom claims
+    refresh['user_type'] = user_type
+    
+    if user_type == 'admin':
+        refresh['user_id'] = user.admin_id
+        refresh['is_superadmin'] = user.is_superadmin
+    else:
+        refresh['user_id'] = user.customer_id
+
+    access = refresh.access_token
+    access['user_type'] = user_type
+    
+    if user_type == 'admin':
+        access['user_id'] = user.admin_id
+        access['is_superadmin'] = user.is_superadmin
+    else:
+        access['user_id'] = user.customer_id
+
     return {
         'refresh': str(refresh),
-        'access': str(refresh.access_token),
+        'access': str(access),
     }
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def customer_signup(request):
-    """
-    Register a new customer
-    """
     serializer = CustomerSerializer(data=request.data)
     if serializer.is_valid():
-        customer = serializer.save()
-        tokens = get_tokens_for_user(customer, "customer")
+        user = serializer.save()
+        tokens = get_tokens_for_user(user, 'customer')
         return Response({
-            "user": CustomerSerializer(customer).data,
-            "tokens": tokens
+            'user': serializer.data,
+            'tokens': tokens,
+            'message': 'Signup successful'
         }, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def customer_login(request):
-    """
-    Authenticate a customer using phone and password
-    """
-    phone = request.data.get("phone")
-    password = request.data.get("password")
+    phone = request.data.get('phone')
+    password = request.data.get('password')
 
     if not phone or not password:
-        return Response({"error": "Phone and password are required"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': 'Please provide both phone and password'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        customer = Customer.objects.get(phone=phone)
-        if customer.check_password(password):
-            tokens = get_tokens_for_user(customer, "customer")
-            return Response({
-                "user": CustomerSerializer(customer).data,
-                "tokens": tokens
-            }, status=status.HTTP_200_OK)
-        else:
-            return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+        user = Customer.objects.get(phone=phone)
     except Customer.DoesNotExist:
-        return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'error': 'Invalid phone or password'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    if not user.check_password(password):
+        return Response({'error': 'Invalid phone or password'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    tokens = get_tokens_for_user(user, 'customer')
+    serializer = CustomerSerializer(user)
+    
+    return Response({
+        'user': serializer.data,
+        'tokens': tokens,
+        'message': 'Login successful'
+    }, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def admin_login(request):
-    """
-    Authenticate an admin using phone and password
-    """
-    phone = request.data.get("phone")
-    password = request.data.get("password")
+    phone = request.data.get('phone')
+    password = request.data.get('password')
 
     if not phone or not password:
-        return Response({"error": "Phone and password are required"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': 'Please provide both phone and password'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        # Djongo SQL parsing fix: Filter by phone first then check is_active in python
-        # or use a raw-compatible filter.
-        admin = Admin.objects.filter(phone=phone).first()
-        if admin and admin.is_active:
-            if admin.check_password(password):
-                tokens = get_tokens_for_user(admin, "admin")
-                return Response({
-                    "user": AdminSerializer(admin).data,
-                    "tokens": tokens
-                }, status=status.HTTP_200_OK)
-            else:
-                return Response({"error": "Invalid credentials or account inactive"}, status=status.HTTP_401_UNAUTHORIZED)
+        user = Admin.objects.get(phone=phone)
+    except Admin.DoesNotExist:
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    if not user.check_password(password):
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
         
-        # If admin not found or inactive, we reach here
-        return Response({"error": "Admin not found or inactive"}, status=status.HTTP_404_NOT_FOUND)
-    except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    if not user.is_active:
+         return Response({'error': 'Account is inactive'}, status=status.HTTP_403_FORBIDDEN)
+
+    tokens = get_tokens_for_user(user, 'admin')
+    serializer = AdminSerializer(user)
+    
+    return Response({
+        'user': serializer.data,
+        'tokens': tokens,
+        'message': 'Admin login successful'
+    }, status=status.HTTP_200_OK)
 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def get_user_profile(request):
-    """
-    Get current logged in user profile based on JWT token content
-    """
-    user_id = request.auth.get('custom_id')
-    user_type = request.auth.get('user_type')
+    user = request.user
+    # request.user is determined by the authentication class
+    # Check type of user instance to decide serializer
+    if isinstance(user, Admin):
+        serializer = AdminSerializer(user)
+        user_type = 'admin'
+    else:
+        serializer = CustomerSerializer(user)
+        user_type = 'customer'
 
-    if user_type == 'customer':
-        try:
-            user = Customer.objects.get(customer_id=user_id)
-            return Response(CustomerSerializer(user).data)
-        except Customer.DoesNotExist:
-            return Response({"error": "User not found"}, status=404)
-    elif user_type == 'admin':
-        try:
-            user = Admin.objects.get(admin_id=user_id)
-            return Response(AdminSerializer(user).data)
-        except Admin.DoesNotExist:
-            return Response({"error": "Admin not found"}, status=404)
+    return Response({
+        'user': serializer.data,
+        'user_type': user_type
+    })
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def update_user_profile(request):
+    user = request.user
     
-    return Response({"error": "Invalid user type"}, status=400)
+    # We only allow Customer updates for now based on requirements, 
+    # but let's support Admin too if needed or just check type.
+    if isinstance(user, Admin):
+        serializer = AdminSerializer(user, data=request.data, partial=True)
+    else:
+        # Prevent phone number duplication if phone is being changed
+        new_phone = request.data.get('phone')
+        if new_phone and new_phone != user.phone:
+            if Customer.objects.filter(phone=new_phone).exists():
+                return Response({'error': 'Phone number already registered with another account.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        serializer = CustomerSerializer(user, data=request.data, partial=True)
+
+    if serializer.is_valid():
+        # 🟢 FIX for Duplication: Use update() instead of save()
+        # Because object.save() is creating new records due to pk=None issue with Djongo/MongoDB
+        
+        updated_data = serializer.validated_data
+        
+        if isinstance(user, Customer):
+             Customer.objects.filter(customer_id=user.customer_id).update(**updated_data)
+             # Re-fetch to return updated data
+             user = Customer.objects.get(customer_id=user.customer_id)
+             return Response({
+                'user': CustomerSerializer(user).data,
+                'message': 'Profile updated successfully'
+            })
+        
+        # Admin Updates (if any)
+        if isinstance(user, Admin):
+             Admin.objects.filter(admin_id=user.admin_id).update(**updated_data)
+             user = Admin.objects.get(admin_id=user.admin_id)
+             return Response({
+                'user': AdminSerializer(user).data,
+                'message': 'Profile updated successfully'
+            })
+
+        # Fallback (should not reach here)
+        serializer.save()
+        return Response({
+            'user': serializer.data,
+            'message': 'Profile updated successfully'
+        })
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+# --- Google OAuth ---
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def google_auth(request):
+    """
+    Handles Google Login AND Signup.
+    Expected Payload:
+    - token: Google ID Token
+    - phone: (Optional) Phone number. Required only for NEW users.
+    """
+    token = request.data.get('token')
+    phone = request.data.get('phone')
+    
+    if not token:
+        return Response({'error': 'Google token is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Verify the token
+        # You should replace 'YOUR_GOOGLE_CLIENT_ID' with the actual client ID if verifying audience
+        # logic: id_token.verify_oauth2_token(token, requests.Request(), CLIENT_ID)
+        # For now, we will trust the token if we can decode it, but strictly you must verify audience.
+        CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
+        
+        # Bypass SSL Verification for local dev env issues (SSLError)
+        session = requests.Session()
+        session.verify = False 
+        transport = google_requests.Request(session)
+        
+        id_info = id_token.verify_oauth2_token(token, transport, CLIENT_ID)
+        
+        email = id_info.get('email')
+        name = id_info.get('name')
+        
+        if not email:
+            return Response({'error': 'Google token does not contain email'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if user exists
+        try:
+            user = Customer.objects.get(email=email)
+            # Login existing user
+            tokens = get_tokens_for_user(user, 'customer')
+            serializer = CustomerSerializer(user)
+            return Response({
+                'user': serializer.data,
+                'tokens': tokens,
+                'message': 'Login successful',
+                'is_new_user': False
+            }, status=status.HTTP_200_OK)
+            
+        except Customer.DoesNotExist:
+            # New User Flow
+            if not phone:
+                # User needs to provide phone number
+                return Response({
+                    'message': 'User not registered. Phone number required.',
+                    'email': email,
+                    'name': name,
+                    'is_new_user': True
+                }, status=status.HTTP_202_ACCEPTED) # 202 Accepted: Processing continues, need more info
+            
+            # If phone is provided, create user
+            # Check if phone is already taken
+            if Customer.objects.filter(phone=phone).exists():
+                 return Response({'error': 'Phone number already registered with another account.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Create new customer
+            # Generate a random password since they use Google Auth
+            random_password = str(uuid.uuid4())
+            user = Customer.objects.create(
+                name=name,
+                email=email,
+                phone=phone,
+                password=random_password 
+            )
+            # Hash password isn't strictly needed here as we used create() not create_user (common in Django User) 
+            # But our Customer model hashes in save(), so we are good.
+            
+            tokens = get_tokens_for_user(user, 'customer')
+            serializer = CustomerSerializer(user)
+             
+            return Response({
+                'user': serializer.data,
+                'tokens': tokens,
+                'message': 'Signup successful',
+                'is_new_user': True
+            }, status=status.HTTP_201_CREATED)
+
+    except ValueError:
+        return Response({'error': 'Invalid Google Token'}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -6,6 +6,8 @@ from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 from Travellersin_website_backend.serializers import RoomSerializer
 
+
+
 @api_view(["GET", "POST"])
 def rooms_list_create(request):
     if request.method == "GET":
@@ -79,5 +81,25 @@ def check_room_availability(request):
             "is_available": is_available,
             "conflicts": conflicts
         })
+    except Exception as e:
+        return Response({"error": str(e)}, status=400)
+@api_view(["GET"])
+def get_room_bookings(request, room_number):
+    try:
+        # Get all confirmed or pending bookings for this room
+        search_pattern = f",{room_number},"
+        bookings = Booking.objects.filter(
+            room_numbers__icontains=search_pattern,
+            booking_status__in=["confirmed", "pending"]
+        )
+        
+        booked_dates = []
+        for b in bookings:
+            booked_dates.append({
+                "start": b.check_in,
+                "end": b.check_out
+            })
+            
+        return Response(booked_dates)
     except Exception as e:
         return Response({"error": str(e)}, status=400)
