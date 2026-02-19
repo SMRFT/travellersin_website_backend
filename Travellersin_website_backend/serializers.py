@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Rooms, Event, Query, Booking, Customer, Admin, EventBooking, Billing
+from .models import Rooms, Event, Query, Booking, Customer, Admin, EventBooking, Billing, Gallery, GalleryCategory
 from django.db.models import Sum
 
 class RoomSerializer(serializers.ModelSerializer):
@@ -69,44 +69,39 @@ class BookingSerializer(serializers.ModelSerializer):
         if 'booking_id' not in validated_data or not validated_data['booking_id']:
             validated_data['booking_id'] = f"BK-{uuid.uuid4().hex[:8].upper()}"
         
-        # Convert list to comma-separated string for model storage
-        room_nums = validated_data.get('room_numbers')
-        if isinstance(room_nums, list):
-            # Ensure all items are strings and filter out None
-            clean_rooms = [str(r) for r in room_nums if r is not None]
-            validated_data['room_numbers'] = "," + ",".join(clean_rooms) + ","
-        elif isinstance(room_nums, str):
-            # If it's already a string, ensure it has wrapping commas
-            cleaned = room_nums.strip(',')
-            if cleaned:
-                validated_data['room_numbers'] = f",{cleaned},"
-            else:
-                validated_data['room_numbers'] = ""
-            
+        # Note: room_numbers formatting is now handled in validate()
         return super().create(validated_data)
+
 
 
 
     def validate(self, data):
         """
-        Prevent double booking for all rooms in selection
+        Prevent double booking for all rooms in selection, handling partial updates.
         """
-        room_data = data.get("room_numbers")
-        check_in = data.get("check_in")
-        check_out = data.get("check_out")
+        instance = self.instance
+        
+        # Get values from payload or fallback to existing instance values
+        room_data = data.get("room_numbers", instance.room_numbers if instance else None)
+        check_in = data.get("check_in", instance.check_in if instance else None)
+        check_out = data.get("check_out", instance.check_out if instance else None)
 
         if not room_data:
-            raise serializers.ValidationError("At least one room must be selected")
+            raise serializers.ValidationError({"room_numbers": "At least one room must be selected"})
+        
+        if not check_in or not check_out:
+            raise serializers.ValidationError("Check-in and check-out dates are required")
 
+        if check_in >= check_out:
+            raise serializers.ValidationError("Check-out must be after check-in")
+
+        # Parse room list for validation
         if isinstance(room_data, str):
             room_list = [r.strip() for r in room_data.strip(",").split(",") if r.strip()]
         elif isinstance(room_data, list):
             room_list = [str(r) for r in room_data if r is not None]
         else:
             room_list = []
-
-        if check_in >= check_out:
-            raise serializers.ValidationError("Check-out must be after check-in")
 
         # Check availability for each room
         for room_no in room_list:
@@ -119,14 +114,28 @@ class BookingSerializer(serializers.ModelSerializer):
                 booking_status__in=["confirmed", "pending"]
             )
 
-            # 🛠️ EXCLUDE CURRENT BOOKING (For updates)
-            if self.instance:
-                overlapping = overlapping.exclude(pk=self.instance.pk)
+            if instance:
+                overlapping = overlapping.exclude(pk=instance.pk)
 
             if overlapping.exists():
-                raise serializers.ValidationError(f"Room {room_no} already booked for this date range")
+                conflict = overlapping.first()
+                raise serializers.ValidationError(f"Room {room_no} already booked for this date range (Conflict: {conflict.booking_id})")
+
+
+        # Format room_numbers for consistent storage (Comma-separated string)
+        # We update 'data' so it's used in both create and update
+        if isinstance(room_data, list):
+            clean_rooms = [str(r).strip() for r in room_data if r is not None]
+            data['room_numbers'] = "," + ",".join(clean_rooms) + ","
+        elif isinstance(room_data, str):
+            cleaned = room_data.strip(',')
+            if cleaned:
+                data['room_numbers'] = f",{cleaned},"
+            else:
+                data['room_numbers'] = ""
 
         return data
+
 
 class CustomerSerializer(serializers.ModelSerializer):
     id = serializers.SerializerMethodField()
@@ -230,3 +239,23 @@ class BillingSerializer(serializers.ModelSerializer):
             return obj.booking.room_numbers
         except Exception:
             return "N/A"
+
+class GalleryCategorySerializer(serializers.ModelSerializer):
+    id = serializers.SerializerMethodField()
+    class Meta:
+        model = GalleryCategory
+        fields = "__all__"
+    
+    def get_id(self, obj):
+        return str(obj.pk)
+
+class GallerySerializer(serializers.ModelSerializer):
+    id = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source='category.name', read_only=True)
+
+    class Meta:
+        model = Gallery
+        fields = "__all__"
+
+    def get_id(self, obj):
+        return str(obj.pk)
