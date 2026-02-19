@@ -14,9 +14,14 @@ from .Views.payments import create_razorpay_order, verify_payment, confirm_cash_
 from .Views.media import upload_room_image, serve_gridfs_file
 from .Views.whatsapp import send_whatsapp_test
 from .Views.event_bookings import event_bookings_list_create, track_event_booking
-
+from .Views.GalleryView import gallery_list_create, gallery_detail_update_delete, category_list_create, category_detail_delete
 
 urlpatterns = [
+    # Gallery - Category Management
+    path("gallery/", gallery_list_create),
+    path("gallery/<int:pk>/", gallery_detail_update_delete),
+    path("gallery-categories/", category_list_create),
+    path("gallery-categories/<int:pk>/", category_detail_delete),
 
     # Rooms
     path("rooms/", rooms_list_create),

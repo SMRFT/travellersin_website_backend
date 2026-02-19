@@ -112,6 +112,7 @@ class Booking(models.Model):
     cancellation_reason = models.TextField(blank=True, null=True)
 
     discount_amount = models.FloatField(default=0.0)
+    guest_address = models.TextField(blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     lastmodified_at = models.DateTimeField(auto_now=True)
@@ -284,3 +285,24 @@ class Billing(models.Model):
 
     def __str__(self):
         return f"{self.billing_no} - {self.booking.booking_id}"
+
+class GalleryCategory(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+
+class Gallery(models.Model):
+    image_id = models.CharField(max_length=100) # GridFS file ID
+    
+    # Linked to Category Model
+    category = models.ForeignKey(GalleryCategory, on_delete=models.CASCADE, related_name='images')
+    
+    order = models.IntegerField(default=1) # "which 1, 2"
+    title = models.CharField(max_length=100, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.category.name} - {self.title or self.image_id}"
