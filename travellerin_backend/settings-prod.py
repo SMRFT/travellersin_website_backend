@@ -85,6 +85,19 @@ TEMPLATES = [
 WSGI_APPLICATION = 'travellerin_backend.wsgi.application'
 FRONTEND_URL="http://127.0.0.1:6553/_b_a_c_k_e_n_d/Global/"
 
+from datetime import timedelta
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': False,
+    'BLACKLIST_AFTER_ROTATION': False,
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+}
+
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
