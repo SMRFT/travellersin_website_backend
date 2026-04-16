@@ -37,7 +37,45 @@ def bookings_list_create(request):
     if request.method == "POST":
         serializer = BookingSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save()
+            booking = serializer.save()
+            
+            # If initial payment was recorded, create a Billing record
+            payment_details = booking.payment_details or {}
+            amount_paid = float(payment_details.get("amount_paid", 0))
+            
+            if amount_paid > 0:
+                from django.utils import timezone
+                import time
+                import uuid
+                from ..models import Billing
+                
+                t_str = str(int(time.time() * 1000))
+                r_str = uuid.uuid4().hex[:8].upper()
+                billing_no = f"REF_{t_str}_{r_str}"
+                
+                p_type = payment_details.get("payment_type") or payment_details.get("method") or "cash"
+                t_id = payment_details.get("transaction_id") or payment_details.get("latest_transaction_id")
+                
+                try:
+                    Billing.objects.create(
+                        billing_no=billing_no,
+                        booking=booking,
+                        amount_paid=amount_paid,
+                        total_amount=float(payment_details.get("amount", 0)),
+                        payment_type=p_type,
+                        transaction_id=t_id
+                    )
+                    
+                    # Update billing_numbers in booking
+                    if "billing_numbers" not in payment_details:
+                        payment_details["billing_numbers"] = []
+                    payment_details["billing_numbers"].append(billing_no)
+                    payment_details["latest_billing_no"] = billing_no
+                    booking.payment_details = payment_details
+                    booking.save()
+                except Exception as e:
+                    print(f"Error creating initial billing record: {e}")
+            
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 

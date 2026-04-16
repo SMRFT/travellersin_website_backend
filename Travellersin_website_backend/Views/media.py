@@ -58,6 +58,7 @@ def upload_room_image(request):
     filename = f"{uuid.uuid4().hex}{ext}"
     
     # Store in GridFS
+    image.seek(0)
     file_id = fs.put(
         image.read(),
         filename=filename,
@@ -72,13 +73,15 @@ def upload_room_image(request):
         "filename": filename,
         "id": str(file_id)
     }, status=status.HTTP_201_CREATED)
-
 def serve_gridfs_file(request, file_id):
     try:
+        from django.http import FileResponse
         fs = get_gridfs()
-        grid_out = fs.get(ObjectId(file_id))
+        # Clean the file_id - strip trailing slash if it came through str pattern
+        clean_id = file_id.strip('/')
+        grid_out = fs.get(ObjectId(clean_id))
         
-        response = HttpResponse(grid_out.read(), content_type=grid_out.content_type)
+        response = FileResponse(grid_out, content_type=grid_out.content_type)
         response['Content-Disposition'] = f'inline; filename="{grid_out.filename}"'
         return response
     except Exception as e:

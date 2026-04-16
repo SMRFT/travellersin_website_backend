@@ -93,110 +93,116 @@ def admin_dashboard(request):
 def update_booking_status(request, booking_id):
     try:
         booking = Booking.objects.get(booking_id=booking_id)
-    except Booking.DoesNotExist:
-        return Response({"error": "Booking not found"}, status=404)
+        
+        # DEBUG LOGging - Useful for the user to see in terminal
+        print(f"Update Booking Request Body: {request.data}")
 
-    # 1. Update Booking Status (Confirmed, Cancelled, etc.)
-    status_val = request.data.get("booking_status", booking.booking_status)
-    booking.booking_status = status_val
-    
-    if status_val == "cancelled":
-        booking.cancellation_reason = request.data.get("cancellation_reason", "Cancelled by Admin")
-    
-    # 3. Update Dates (New Feature)
-    new_check_in = request.data.get("check_in")
-    new_check_out = request.data.get("check_out")
-    if new_check_in:
-        booking.check_in = new_check_in
-    if new_check_out:
-        booking.check_out = new_check_out
+        # 1. Update Basic Fields
+        status_val = request.data.get("booking_status", booking.booking_status)
+        booking.booking_status = status_val
+        if status_val == "cancelled":
+            booking.cancellation_reason = request.data.get("cancellation_reason", "Cancelled by Admin")
+        
+        check_in = request.data.get("check_in")
+        check_out = request.data.get("check_out")
+        if check_in: booking.check_in = check_in
+        if check_out: booking.check_out = check_out
 
-    # 2. Handle Payment Details
-    payment_details = booking.payment_details or {}
-    # If it's an empty dict, initialize defaults
-    if not payment_details:
-        payment_details = {"amount": 0, "amount_paid": 0, "status": "pending", "method": "cash"}
-    else:
-        # Make a copy to ensure Django detects the change
-        payment_details = dict(payment_details)
+        # 2. Handle Payment Details
+        p_details = dict(booking.payment_details or {"amount": 0, "amount_paid": 0, "status": "pending", "method": "cash"})
+        
+        new_paid = request.data.get("amount_paid")
+        
+        # Extract payment fields - explicit None check so empty string != None
+        _pt = request.data.get("payment_type") or request.data.get("method")
+        p_type = _pt if _pt else None
 
-    # Update amount_paid if provided
-    new_payment_amount = request.data.get("amount_paid")
-    if new_payment_amount is not None:
-        try:
-            amount_to_add = float(new_payment_amount)
-            current_paid = float(payment_details.get("amount_paid", 0))
-            total_amount = float(payment_details.get("amount", 0))
+        _tid = request.data.get("transaction_id")
+        t_id = _tid if (_tid is not None and _tid != '') else None
             
-            updated_paid = current_paid + amount_to_add
-            payment_details["amount_paid"] = updated_paid
-            
-            # --- Billing Logic Start ---
-            # Generate Billing Record for this transaction
-            import uuid
-            from django.utils import timezone
-            
-            if amount_to_add > 0:
-                # billing_no = f"BILL-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+        manual_p_status = request.data.get("payment_status")
+        
+        print(f"DEBUG EXTRACT: p_type={p_type!r}, t_id={t_id!r}, raw={request.data.get('transaction_id')!r}")
+
+        if new_paid is not None:
+            try:
+                amt_to_add = float(new_paid)
+                current_paid = float(p_details.get("amount_paid", 0))
+                current_total = float(p_details.get("amount", 0))
                 
-                # Use REF format
+                # Always increment from current DB value
+                new_total_paid = current_paid + amt_to_add
+                p_details["amount_paid"] = new_total_paid
+                
+                # Auto-calculate status (if not manually overridden)
+                if not manual_p_status:
+                    net_payable = current_total - float(booking.discount_amount or 0)
+                    if float(p_details["amount_paid"]) >= net_payable:
+                        p_details["status"] = "paid"
+                    elif float(p_details["amount_paid"]) > 0:
+                        p_details["status"] = "partially_paid"
+                    else:
+                        p_details["status"] = "pending"
+                else:
+                    p_details["status"] = manual_p_status
+
+                # Record current method/transaction
+                if p_type: 
+                    p_details["method"] = p_type
+                    p_details["payment_type"] = p_type
+                if t_id is not None: 
+                    p_details["transaction_id"] = t_id
+                    p_details["latest_transaction_id"] = t_id
+
+                # Create Billing Entry for this specific transaction
+                import uuid
                 import time
+                from ..models import Billing
                 t_str = str(int(time.time() * 1000))
                 r_str = uuid.uuid4().hex[:8].upper()
-                billing_no = f"REF_{t_str}_{r_str}"
+                bill_no = f"REF_{t_str}_{r_str}"
                 
-                # Determine payment type (default to cash if not provided, or infer from payment_status)
-                # If explicit 'payment_type' is sent in body
-                p_type = request.data.get("payment_type", "cash")
-                
-                # Create Billing Model Entry (The source of truth)
                 try:
+                    print(f"CREATING BILLING: bill_no={bill_no}, amt={amt_to_add}, total={current_total}, ptype={p_type or p_details.get('method','cash')}, t_id={t_id!r}")
                     Billing.objects.create(
-                        billing_no=billing_no,
+                        billing_no=bill_no,
                         booking=booking,
-                        amount_paid=amount_to_add,
-                        total_amount=total_amount,
-                        payment_type=p_type
+                        amount_paid=amt_to_add,
+                        total_amount=current_total,
+                        payment_type=p_type or p_details.get("method", "cash"),
+                        transaction_id=t_id if t_id else None
                     )
-                except Exception as e:
-                    print(f"Error creating billing record: {e}")
-                
-                # Store ONLY the billing_no in booking payment_details
-                if "billing_numbers" not in payment_details:
-                    payment_details["billing_numbers"] = []
-                
-                # Append just the string
-                payment_details["billing_numbers"].append(billing_no)
-                
-                # Also set latest billing_no at top level
-                payment_details["latest_billing_no"] = billing_no
-            # --- Billing Logic End ---
+                    
+                    if "billing_numbers" not in p_details:
+                        p_details["billing_numbers"] = []
+                    if bill_no not in p_details["billing_numbers"]:
+                        p_details["billing_numbers"].append(bill_no)
+                    p_details["latest_billing_no"] = bill_no
+                except Exception as b_err:
+                    print(f"Billing record creation failed: {b_err}")
 
-            # Auto-calculate status
-            if updated_paid >= total_amount:
-                payment_details["status"] = "paid"
-            elif updated_paid > 0:
-                payment_details["status"] = "partially_paid"
-            else:
-                payment_details["status"] = "pending"
-                
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid amount_paid format"}, status=400)
+            except (ValueError, TypeError) as e:
+                print(f"Amount calculation failed: {e}")
 
-    # Explicitly override status if provided
-    manual_status = request.data.get("payment_status")
-    if manual_status:
-        payment_details["status"] = manual_status
-    
-    # Re-assign to the model field
-    booking.payment_details = payment_details
-    booking.save()
+        # Apply finally
+        booking.payment_details = p_details
+        booking.save()
 
-    # Trigger WhatsApp if confirmed
-    if status_val == "confirmed":
-        send_booking_confirmation(booking)
+        # 3. WhatsApp Integration
+        if booking.booking_status == "confirmed":
+            send_booking_confirmation(booking)
 
-    return Response({"message": "Booking updated successfully", "booking": BookingSerializer(booking).data})
+        return Response({
+            "message": "Booking updated successfully", 
+            "booking": BookingSerializer(booking).data
+        })
+
+    except Booking.DoesNotExist:
+        return Response({"error": "Booking not found"}, status=404)
+    except Exception as general_err:
+        import traceback
+        traceback.print_exc()
+        return Response({"error": str(general_err)}, status=500)
 
 import razorpay
 import os
