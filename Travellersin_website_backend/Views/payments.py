@@ -75,8 +75,13 @@ def verify_payment(request):
             except:
                 current_total = 0
                 previously_paid = 0
-            
-            transaction_amount = current_total - previously_paid 
+            # Try to get the actual amount paid from the request, otherwise assume full remaining balance
+            req_amount_paid = request.data.get("amount_paid")
+            if req_amount_paid is not None:
+                transaction_amount = float(req_amount_paid)
+            else:
+                transaction_amount = current_total - previously_paid 
+                
             if transaction_amount < 0: transaction_amount = 0 
 
             new_amount_paid = previously_paid + transaction_amount
