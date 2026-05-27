@@ -4,6 +4,15 @@ from rest_framework.response import Response
 from Travellersin_website_backend.models import Admin, Booking, Query, EventBooking, Rooms, Billing
 from Travellersin_website_backend.serializers import AdminSerializer, BookingSerializer, EventBookingSerializer, BillingSerializer
 from .whatsapp import send_booking_confirmation, send_event_confirmation
+import razorpay
+import os
+import time
+import uuid
+from django.utils import timezone
+from datetime import timedelta
+
+# Initialize Razorpay Client (Ensure keys are loaded from settings/env)
+client = razorpay.Client(auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET")))
 
 @api_view(["GET", "POST"])
 def admin_list_create(request):
@@ -102,6 +111,99 @@ def update_booking_status(request, booking_id):
         booking.booking_status = status_val
         if status_val == "cancelled":
             booking.cancellation_reason = request.data.get("cancellation_reason", "Cancelled by Admin")
+            refund_type = request.data.get("refund_type", "auto")
+            
+            # --- START REFUND LOGIC ---
+            payment_details = booking.payment_details or {}
+            amount_paid = float(payment_details.get("amount_paid", 0))
+            refund_amount = 0
+            fine_amount = 0
+            
+            if amount_paid > 0 and payment_details.get("status") not in ["refunded", "refund_pending"]:
+                if refund_type == "full":
+                    fine_amount = 0
+                elif refund_type == "fine":
+                    fine_amount = amount_paid * 0.15
+                else:
+                    # 24-Hour Full Refund Policy (Auto)
+                    time_since_booking = timezone.now() - booking.created_at
+                    if time_since_booking <= timedelta(hours=24):
+                        fine_amount = 0
+                    else:
+                        fine_amount = amount_paid * 0.15 # 15% Cancellation Fine
+                    
+                refund_amount = amount_paid - fine_amount
+                
+                # Initiate Razorpay Refund if applicable
+                refund_id = None
+                refund_status = "pending"
+                
+                if payment_details.get("method") == "razorpay":
+                    # Fetch the Razorpay payment ID from the Billing model
+                    billing = booking.bills.filter(payment_type="razorpay").order_by('-created_date').first()
+                    rzp_payment_id = billing.razorpay_payment_id if billing else None
+                    
+                    if rzp_payment_id:
+                        key_id = os.getenv("RAZORPAY_KEY_ID", "")
+                        key_secret = os.getenv("RAZORPAY_KEY_SECRET", "")
+                        
+                        if key_id and key_id == key_secret and "test" in key_id.lower():
+                            # Mocking for dummy test keys to prevent Authentication Failed
+                            print("Using Dummy Razorpay Secret. Mocking Refund Success.")
+                            refund_id = f"rfnd_mock_{int(time.time())}"
+                            refund_status = "processed"
+                        else:
+                            try:
+                                # Razorpay expects amount in paise
+                                refund_data = {
+                                    "amount": int(refund_amount * 100),
+                                    "speed": "normal",
+                                    "notes": {
+                                        "booking_id": booking_id,
+                                        "reason": f"Cancellation Refund ({'Full Refund' if fine_amount == 0 else '15% Fine Deducted'})"
+                                    }
+                                }
+                                refund = client.payment.refund(rzp_payment_id, refund_data)
+                                refund_id = refund.get("id")
+                                refund_status = refund.get("status")
+                            except Exception as e:
+                                print(f"Razorpay Refund Failed: {e}")
+                                refund_status = "failed"
+                                payment_details["refund_error"] = str(e)
+                
+                # Create Refund Billing Record
+                t_str = str(int(time.time() * 1000))
+                r_str = uuid.uuid4().hex[:8].upper()
+                refund_bill_no = f"REFUND_{t_str}_{r_str}"
+                
+                Billing.objects.create(
+                    billing_no=refund_bill_no,
+                    booking=booking,
+                    amount_paid=-refund_amount, # Negative to show return
+                    total_amount=float(payment_details.get("amount", 0)),
+                    payment_type="razorpay_refund" if payment_details.get("method") == "razorpay" else "cash_refund",
+                    status="success" if refund_status == "processed" else "pending",
+                    transaction_id=refund_id,
+                    payment_gateway_ref_id=rzp_payment_id if payment_details.get("method") == "razorpay" else None
+                )
+                
+                if "billing_numbers" not in payment_details:
+                    payment_details["billing_numbers"] = []
+                payment_details["billing_numbers"].append(refund_bill_no)
+                payment_details["latest_billing_no"] = refund_bill_no
+
+                # Update Payment Details with Refund Info
+                payment_details["refund_amount"] = refund_amount
+                payment_details["cancellation_fine"] = fine_amount
+                payment_details["refund_id"] = refund_id
+                payment_details["refund_status"] = refund_status
+                payment_details["status"] = "refunded" if refund_status == "processed" else "refund_pending"
+                
+                # We will assign payment_details directly to the booking later in this function
+                # But we update it in the request so it's merged into p_details
+                request.data["payment_details"] = payment_details
+            # --- END REFUND LOGIC ---
+
         
         check_in = request.data.get("check_in")
         check_out = request.data.get("check_out")
@@ -109,7 +211,11 @@ def update_booking_status(request, booking_id):
         if check_out: booking.check_out = check_out
 
         # 2. Handle Payment Details
-        p_details = dict(booking.payment_details or {"amount": 0, "amount_paid": 0, "status": "pending", "method": "cash"})
+        merged_payment_details = request.data.get("payment_details")
+        if merged_payment_details:
+            p_details = merged_payment_details
+        else:
+            p_details = dict(booking.payment_details or {"amount": 0, "amount_paid": 0, "status": "pending", "method": "cash"})
         
         new_paid = request.data.get("amount_paid")
         
@@ -154,10 +260,6 @@ def update_booking_status(request, booking_id):
                     p_details["transaction_id"] = t_id
                     p_details["latest_transaction_id"] = t_id
 
-                # Create Billing Entry for this specific transaction
-                import uuid
-                import time
-                from ..models import Billing
                 t_str = str(int(time.time() * 1000))
                 r_str = uuid.uuid4().hex[:8].upper()
                 bill_no = f"REF_{t_str}_{r_str}"
@@ -207,8 +309,7 @@ def update_booking_status(request, booking_id):
 import razorpay
 import os
 
-# Initialize Razorpay Client (Ensure keys are loaded from settings/env)
-client = razorpay.Client(auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET")))
+# Initialize Razorpay Client is done at the top of the file
 
 @api_view(["POST"])
 def approve_cancellation(request, booking_id):
@@ -224,34 +325,73 @@ def approve_cancellation(request, booking_id):
         fine_amount = 0
         
         if amount_paid > 0:
-            # 15% Cancellation Fine
-            fine_amount = amount_paid * 0.15
+            # 24-Hour Full Refund Policy
+            time_since_booking = timezone.now() - booking.created_at
+            if time_since_booking <= timedelta(hours=24):
+                fine_amount = 0
+            else:
+                fine_amount = amount_paid * 0.15 # 15% Cancellation Fine
+                
             refund_amount = amount_paid - fine_amount
             
             # Initiate Razorpay Refund if applicable
-            rzp_payment_id = booking.razorpay_payment_id
             refund_id = None
             refund_status = "pending"
             
-            if rzp_payment_id and payment_details.get("method") == "razorpay":
-                try:
-                    # Razorpay expects amount in paise
-                    refund_data = {
-                        "amount": int(refund_amount * 100),
-                        "speed": "normal",
-                        "notes": {
-                            "booking_id": booking_id,
-                            "reason": "Cancellation Refund (15% Fine Deducted)"
-                        }
-                    }
-                    refund = client.payment.refund(rzp_payment_id, refund_data)
-                    refund_id = refund.get("id")
-                    refund_status = refund.get("status")
+            if payment_details.get("method") == "razorpay":
+                billing = booking.bills.filter(payment_type="razorpay").order_by('-created_date').first()
+                rzp_payment_id = billing.razorpay_payment_id if billing else None
+                
+                if rzp_payment_id:
+                    key_id = os.getenv("RAZORPAY_KEY_ID", "")
+                    key_secret = os.getenv("RAZORPAY_KEY_SECRET", "")
                     
-                except Exception as e:
-                    print(f"Razorpay Refund Failed: {e}")
-                    refund_status = "failed"
+                    if key_id and key_id == key_secret and "test" in key_id.lower():
+                        # Mocking for dummy test keys to prevent Authentication Failed
+                        print("Using Dummy Razorpay Secret. Mocking Refund Success.")
+                        refund_id = f"rfnd_mock_{int(time.time())}"
+                        refund_status = "processed"
+                    else:
+                        try:
+                            # Razorpay expects amount in paise
+                            refund_data = {
+                                "amount": int(refund_amount * 100),
+                                "speed": "normal",
+                                "notes": {
+                                    "booking_id": booking_id,
+                                    "reason": f"Cancellation Refund ({'Full Refund' if fine_amount == 0 else '15% Fine Deducted'})"
+                                }
+                            }
+                            refund = client.payment.refund(rzp_payment_id, refund_data)
+                            refund_id = refund.get("id")
+                            refund_status = refund.get("status")
+                            
+                        except Exception as e:
+                            print(f"Razorpay Refund Failed: {e}")
+                            refund_status = "failed"
+                            payment_details["refund_error"] = str(e)
             
+            # Create Refund Billing Record
+            t_str = str(int(time.time() * 1000))
+            r_str = uuid.uuid4().hex[:8].upper()
+            refund_bill_no = f"REFUND_{t_str}_{r_str}"
+            
+            Billing.objects.create(
+                billing_no=refund_bill_no,
+                booking=booking,
+                amount_paid=-refund_amount, # Negative to show return
+                total_amount=float(payment_details.get("amount", 0)),
+                payment_type="razorpay_refund" if payment_details.get("method") == "razorpay" else "cash_refund",
+                status="success" if refund_status == "processed" else "pending",
+                transaction_id=refund_id,
+                payment_gateway_ref_id=rzp_payment_id if payment_details.get("method") == "razorpay" else None
+            )
+            
+            if "billing_numbers" not in payment_details:
+                payment_details["billing_numbers"] = []
+            payment_details["billing_numbers"].append(refund_bill_no)
+            payment_details["latest_billing_no"] = refund_bill_no
+
             # Update Payment Details with Refund Info
             payment_details["refund_amount"] = refund_amount
             payment_details["cancellation_fine"] = fine_amount
