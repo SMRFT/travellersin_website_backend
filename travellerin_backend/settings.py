@@ -111,7 +111,7 @@ import certifi
 DATABASES = {
     'default': {
         'ENGINE': 'djongo',
-        'NAME': os.getenv("TIWEB_DB_NAME"),
+        'NAME': os.getenv("TIWEB_DB_NAME","TravellersIN_Website"),
         'ENFORCE_SCHEMA': False,
         'CLIENT': {
             'host': os.getenv("GLOBAL_DB_HOST"),
