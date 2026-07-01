@@ -25,8 +25,27 @@ class Rooms(models.Model):
 
     status = models.CharField(max_length=20, default="active")  # "active" or "inactive"
 
+    created_by = models.CharField(max_length=50, blank=True, null=True)
+    lastmodified_by = models.CharField(max_length=50, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        # Populate Audit Fields
+        from Travellersin_website_backend.middleware import get_current_user
+        user = get_current_user()
+        phone_num = getattr(user, 'phone', None) if user else None
+
+        is_new = self._state.adding or not Rooms.objects.filter(pk=self.pk).exists()
+        if is_new:
+            if phone_num and not self.created_by:
+                self.created_by = phone_num
+        
+        if phone_num:
+            self.lastmodified_by = phone_num
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Room {self.room_number}"
@@ -235,7 +254,11 @@ class Admin(models.Model):
     is_active = models.BooleanField(default=True)
     is_superadmin = models.BooleanField(default=False)
 
+    created_by = models.CharField(max_length=50, blank=True, null=True)
+    lastmodified_by = models.CharField(max_length=50, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
+    lastmodified_at = models.DateTimeField(auto_now=True)
 
     def save(self, *args, **kwargs):
         if not self.admin_id:
@@ -244,6 +267,19 @@ class Admin(models.Model):
         # 🔐 Hash password only once
         if not self.password.startswith("pbkdf2_"):
             self.password = make_password(self.password)
+
+        # Populate Audit Fields
+        from Travellersin_website_backend.middleware import get_current_user
+        user = get_current_user()
+        phone_num = getattr(user, 'phone', None) if user else None
+
+        is_new = self._state.adding or not Admin.objects.filter(pk=self.pk).exists()
+        if is_new:
+            if phone_num and not self.created_by:
+                self.created_by = phone_num
+        
+        if phone_num:
+            self.lastmodified_by = phone_num
 
         super().save(*args, **kwargs)
 

@@ -8,6 +8,7 @@ class RoomSerializer(serializers.ModelSerializer):
     class Meta:
         model = Rooms
         fields = "__all__"
+        read_only_fields = ["created_by", "lastmodified_by"]
 
     def get_id(self, obj):
         return str(obj.room_number)
@@ -168,7 +169,18 @@ class AdminSerializer(serializers.ModelSerializer):
             "email",
             "password",
             "is_active",
-            "is_superadmin"
+            "is_superadmin",
+            "created_by",
+            "lastmodified_by",
+            "created_at",
+            "lastmodified_at"
+        ]
+        read_only_fields = [
+            "admin_id",
+            "created_by",
+            "lastmodified_by",
+            "created_at",
+            "lastmodified_at"
         ]
         extra_kwargs = {
             "password": {"write_only": True}
