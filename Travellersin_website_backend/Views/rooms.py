@@ -65,6 +65,16 @@ def check_room_availability(request):
         conflicts = []
 
         for room_no in rooms_list:
+            try:
+                room_obj = Rooms.objects.get(room_number=room_no)
+                if room_obj.status == "inactive":
+                    is_available = False
+                    conflicts.append(room_no)
+                    continue
+            except Rooms.DoesNotExist:
+                is_available = False
+                conflicts.append(room_no)
+                continue
             # We use delimiters for exact matching in comma-separated string
             search_pattern = f",{room_no},"
             overlapping = Booking.objects.filter(

@@ -62,6 +62,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'Travellersin_website_backend.middleware.ThreadLocalMiddleware',
 ]
 
 ROOT_URLCONF = 'travellerin_backend.urls'

@@ -475,11 +475,16 @@ def admin_room_availability(request):
             target_time = make_aware(target_time)
         
         rooms = Rooms.objects.all()
-        # Active bookings for this precise moment (overlap check)
-        # check_in <= target_time < check_out
+        
+        # Get start and end of target_time's day
+        start_of_day = target_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = target_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+        # Active bookings: either currently occupied (overlapping target_time)
+        # or checking in today (same day as target_time)
+        from django.db.models import Q
         active_bookings = Booking.objects.filter(
-            check_in__lte=target_time,
-            check_out__gt=target_time,
+            Q(check_in__lte=target_time, check_out__gt=target_time) | Q(check_in__range=(start_of_day, end_of_day)),
             booking_status__in=["confirmed", "pending"]
         )
 
@@ -498,7 +503,9 @@ def admin_room_availability(request):
             status_val = "available"
             booking_details = None
             
-            if room_booking:
+            if room.status == "inactive":
+                status_val = "inactive"
+            elif room_booking:
                 status_val = room_booking.booking_status
                 booking_details = {
                     "booking_id": room_booking.booking_id,
