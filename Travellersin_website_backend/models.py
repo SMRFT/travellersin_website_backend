@@ -23,6 +23,8 @@ class Rooms(models.Model):
     offers = models.JSONField(default=dict, blank=True, null=True)
     # example: {"discount_percent": 10, "description": "Weekday offer"}
 
+    status = models.CharField(max_length=20, default="active")  # "active" or "inactive"
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -117,6 +119,10 @@ class Booking(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     lastmodified_at = models.DateTimeField(auto_now=True)
 
+    created_by = models.CharField(max_length=50, blank=True, null=True)
+    lastmodified_by = models.CharField(max_length=50, blank=True, null=True)
+    created_type = models.CharField(max_length=20, blank=True, null=True)
+
     def save(self, *args, **kwargs):
         # Enforce Payment Status Consistency
         if self.payment_details:
@@ -148,6 +154,32 @@ class Booking(models.Model):
             except (ValueError, TypeError, ImportError):
                 # If JSON parsing fails or types are wrong, skip validation to avoid breaking save
                 pass
+
+        # Populate Audit Fields (created_by, lastmodified_by, created_type)
+        from Travellersin_website_backend.middleware import get_current_user
+        from Travellersin_website_backend.models import Admin, Customer
+
+        user = get_current_user()
+        role = "customer"  # Default to customer role
+        phone_num = None
+
+        if user and user.is_authenticated:
+            if isinstance(user, Admin):
+                role = "Admin"
+                phone_num = getattr(user, 'phone', None)
+            elif isinstance(user, Customer):
+                role = "customer"
+                phone_num = getattr(user, 'phone', None)
+
+        is_new = self._state.adding or not Booking.objects.filter(pk=self.pk).exists()
+        if is_new:
+            if role and not self.created_type:
+                self.created_type = role
+            if phone_num and not self.created_by:
+                self.created_by = phone_num
+        
+        if phone_num:
+            self.lastmodified_by = phone_num
         
         super().save(*args, **kwargs)
 

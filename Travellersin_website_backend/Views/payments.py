@@ -84,6 +84,17 @@ def verify_payment(request):
                 
             if transaction_amount < 0: transaction_amount = 0 
 
+            # Enforce minimum 15% payment for customer bookings on first payment
+            from ..models import Admin
+            is_admin = request.user and request.user.is_authenticated and isinstance(request.user, Admin)
+            if not is_admin and previously_paid == 0:
+                min_required = 0.15 * current_total
+                if transaction_amount < (min_required - 0.01):
+                    return Response(
+                        {"error": f"Minimum 15% advance payment is required for customer bookings. Required: {min_required}, Paid: {transaction_amount}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
             new_amount_paid = previously_paid + transaction_amount
             payment_status = "paid" if new_amount_paid >= current_total else "partially_paid"
 
@@ -141,6 +152,14 @@ def confirm_cash_booking(request):
     """
     Confirm a booking with Cash (Pay at Hotel) method
     """
+    from ..models import Admin
+    is_admin = request.user and request.user.is_authenticated and isinstance(request.user, Admin)
+    if not is_admin:
+        return Response(
+            {"error": "Cash/non-advance bookings are only allowed for Admins. Customers must make a minimum 15% advance payment online."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
     booking_id = request.data.get("booking_id")
 
     try:

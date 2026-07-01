@@ -78,6 +78,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+    'Travellersin_website_backend.middleware.ThreadLocalMiddleware',
 ]
 
 ROOT_URLCONF = 'travellerin_backend.urls'

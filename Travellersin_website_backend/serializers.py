@@ -41,7 +41,7 @@ class BookingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = "__all__"
-        read_only_fields = ["booking_id", "created_at", "lastmodified_at"]
+        read_only_fields = ["booking_id", "created_at", "lastmodified_at", "created_by", "lastmodified_by", "created_type"]
 
     def get_id(self, obj):
         return str(obj.pk)
