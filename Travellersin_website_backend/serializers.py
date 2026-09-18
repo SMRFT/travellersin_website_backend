@@ -99,16 +99,38 @@ class RoomSerializer(serializers.ModelSerializer):
                 if not img:
                     continue
                 img_str = str(img).strip()
-                if img_str.startswith('http://') or img_str.startswith('https://') or img_str.startswith('data:'):
+                # Clean local dev hostnames
+                if '127.0.0.1:1919' in img_str or 'localhost:1919' in img_str or 'localhost:3000' in img_str or 'localhost:3001' in img_str:
+                    import re
+                    m = re.search(r'media/gridfs/([^/]+)', img_str)
+                    if m:
+                        img_str = m.group(1)
+                    else:
+                        import re
+                        img_str = re.sub(r'^https?://[^/]+', '', img_str)
+
+                if (img_str.startswith('http://') or img_str.startswith('https://')) and not ('127.0.0.1' in img_str or 'localhost' in img_str):
+                    formatted_images.append(img_str)
+                elif img_str.startswith('data:'):
                     formatted_images.append(img_str)
                 else:
-                    path = img_str if img_str.startswith('/') else f"/{img_str}"
-                    if not '/' in img_str:
+                    if 'media/gridfs/' in img_str:
+                        file_id = img_str.split('media/gridfs/')[-1].strip('/')
+                        path = f"/_b_a_c_k_e_n_d/travellerinwebsite/media/gridfs/{file_id}/"
+                    elif not '/' in img_str:
                         path = f"/_b_a_c_k_e_n_d/travellerinwebsite/media/gridfs/{img_str}/"
-                    if request:
-                        formatted_images.append(request.build_absolute_uri(path))
                     else:
-                        formatted_images.append(f"http://127.0.0.1:1919{path}")
+                        path = img_str if img_str.startswith('/') else f"/{img_str}"
+                        if not path.startswith('/_b_a_c_k_e_n_d/travellerinwebsite/'):
+                            path = f"/_b_a_c_k_e_n_d/travellerinwebsite{path}"
+
+                    if request:
+                        uri = request.build_absolute_uri(path)
+                        if 'test.shinova.in' in uri or 'shinova.in' in uri:
+                            uri = uri.replace('http://', 'https://')
+                        formatted_images.append(uri)
+                    else:
+                        formatted_images.append(path)
             ret['images'] = formatted_images
             
         return ret
@@ -820,10 +842,34 @@ class GallerySerializer(serializers.ModelSerializer):
         if not obj.image_id:
             return ""
         img_str = str(obj.image_id).strip()
-        if img_str.startswith('http://') or img_str.startswith('https://') or img_str.startswith('data:'):
+        if '127.0.0.1:1919' in img_str or 'localhost:1919' in img_str or 'localhost:3000' in img_str or 'localhost:3001' in img_str:
+            import re
+            m = re.search(r'media/gridfs/([^/]+)', img_str)
+            if m:
+                img_str = m.group(1)
+            else:
+                import re
+                img_str = re.sub(r'^https?://[^/]+', '', img_str)
+
+        if (img_str.startswith('http://') or img_str.startswith('https://')) and not ('127.0.0.1' in img_str or 'localhost' in img_str):
             return img_str
-        path = f"/_b_a_c_k_e_n_d/travellerinwebsite/media/gridfs/{img_str}/"
+        elif img_str.startswith('data:'):
+            return img_str
+
+        if 'media/gridfs/' in img_str:
+            file_id = img_str.split('media/gridfs/')[-1].strip('/')
+            path = f"/_b_a_c_k_e_n_d/travellerinwebsite/media/gridfs/{file_id}/"
+        elif not '/' in img_str:
+            path = f"/_b_a_c_k_e_n_d/travellerinwebsite/media/gridfs/{img_str}/"
+        else:
+            path = img_str if img_str.startswith('/') else f"/{img_str}"
+            if not path.startswith('/_b_a_c_k_e_n_d/travellerinwebsite/'):
+                path = f"/_b_a_c_k_e_n_d/travellerinwebsite{path}"
+
         request = self.context.get('request')
         if request:
-            return request.build_absolute_uri(path)
-        return f"http://127.0.0.1:1919{path}"
+            uri = request.build_absolute_uri(path)
+            if 'test.shinova.in' in uri or 'shinova.in' in uri:
+                uri = uri.replace('http://', 'https://')
+            return uri
+        return path
