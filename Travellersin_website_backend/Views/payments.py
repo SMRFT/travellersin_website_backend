@@ -1,0 +1,258 @@
+import os
+import razorpay
+from django.conf import settings
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+from ..models import Booking
+from ..serializers import BookingSerializer
+from .whatsapp import send_booking_confirmation
+from ..utils import get_auth_user
+
+def get_financial_year_prefix(dt=None):
+    if dt is None:
+        dt = timezone.now()
+    if dt.month >= 4:
+        fy_year = dt.year % 100
+    else:
+        fy_year = (dt.year - 1) % 100
+    return f"TRL{fy_year:03d}"
+
+def generate_billing_no(dt=None):
+    from Travellersin_website_backend.models import Billing
+    prefix = get_financial_year_prefix(dt)
+    full_prefix = f"{prefix}/"
+    existing_bills = list(Billing.objects.filter(billing_no__startswith=full_prefix))
+    max_num = 0
+    for b in existing_bills:
+        try:
+            num_part = str(b.billing_no).split("/")[-1].strip()
+            if num_part.isdigit():
+                val = int(num_part)
+                if val > max_num:
+                    max_num = val
+        except (ValueError, IndexError):
+            pass
+    next_num = max_num + 1
+    return f"{prefix}/{next_num:05d}"
+
+# Initialize Razorpay Client
+client = razorpay.Client(auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET")))
+
+@api_view(['POST'])
+@permission_classes([AllowAny]) # Change to IsAuthenticated if you want to restrict
+def create_razorpay_order(request):
+    """
+    Create a Razorpay Order
+    """
+    amount = request.data.get("amount")
+    currency = "INR"
+
+    if not amount:
+        return Response({"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Razorpay expects amount in paise (1 INR = 100 paise)
+    data = {
+        "amount": int(float(amount) * 100),
+        "currency": currency,
+        "payment_capture": 1 # Auto capture payment
+    }
+
+    try:
+        order = client.order.create(data=data)
+        return Response(order, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_payment(request):
+    """
+    Record Payment Transaction (Simplified Flow)
+    Skipping Signature Verification as per request.
+    """
+    razorpay_payment_id = request.data.get("razorpay_payment_id")
+    # razorpay_order_id = request.data.get("razorpay_order_id") # Not used in this flow
+    # razorpay_signature = request.data.get("razorpay_signature") # Not used in this flow
+    razorpay_payment_id = request.data.get("razorpay_payment_id")
+    booking_id = request.data.get("booking_id")
+
+    print(f"DEBUG Verify Payment Data: {request.data}")
+
+    if not razorpay_payment_id or not booking_id:
+         return Response({"error": "Missing payment_id or booking_id"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Custom Transaction ID Generation (REF_TIMESTAMP_RANDOM)
+        import time
+        import uuid
+        from ..models import Billing
+        t_str = str(int(time.time() * 1000))
+        r_str = uuid.uuid4().hex[:8].upper()
+        generated_transaction_id = f"REF_{t_str}_{r_str}"
+        billing_id = generate_billing_no()
+
+        # Update booking status
+        try:
+            booking = Booking.objects.get(booking_id=booking_id)
+
+            # Calculate Amounts
+            try:
+                current_total = float(booking.payment_details.get("amount", 0))
+                previously_paid = float(booking.payment_details.get("amount_paid", 0))
+            except:
+                current_total = 0
+                previously_paid = 0
+            # Try to get the actual amount paid from the request, otherwise assume full remaining balance
+            req_amount_paid = request.data.get("amount_paid")
+            if req_amount_paid is not None:
+                transaction_amount = float(req_amount_paid)
+            else:
+                transaction_amount = current_total - previously_paid 
+                
+            if transaction_amount < 0: transaction_amount = 0 
+
+            # Enforce minimum 15% payment for customer bookings on first payment
+            from ..models import Admin
+            is_admin = request.user and request.user.is_authenticated and isinstance(request.user, Admin)
+            if not is_admin and previously_paid == 0:
+                min_required = 0.15 * current_total
+                if transaction_amount < (min_required - 0.01):
+                    return Response(
+                        {"error": f"Minimum 15% advance payment is required for customer bookings. Required: {min_required}, Paid: {transaction_amount}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+            new_amount_paid = previously_paid + transaction_amount
+            payment_status = "paid" if new_amount_paid >= current_total else "partially_paid"
+
+            auth_user_id = get_auth_user(request)
+            # Update Billing Numbers List
+            billing_numbers = booking.payment_details.get("billing_numbers", [])
+            if not isinstance(billing_numbers, list):
+                billing_numbers = []
+            if billing_id not in billing_numbers:
+                billing_numbers.append(billing_id)
+
+            # Update Payment Details JSON structure: only amount, status, billing_numbers
+            booking.payment_details = {
+                "amount": current_total,
+                "status": payment_status,
+                "billing_numbers": billing_numbers
+            }
+            
+            booking.booking_status = "confirmed"
+            booking.lastmodified_by = str(auth_user_id)
+            booking.lastmodified_date = timezone.now()
+            booking.save()
+            
+            # Create Billing Record
+            Billing.objects.create(
+                booking=booking,
+                billing_no=billing_id, 
+                amount_paid=transaction_amount,
+                payment_type="razorpay",
+                status="success",
+                
+                # New Fields
+                transaction_id=generated_transaction_id,
+                payment_gateway_ref_id=razorpay_payment_id,
+                
+                razorpay_payment_id=razorpay_payment_id,
+                created_by=str(auth_user_id)
+            )
+            
+            # Send WhatsApp Confirmation
+            send_booking_confirmation(booking)
+            
+            return Response({"message": "Payment recorded and booking confirmed", "booking": BookingSerializer(booking).data}, status=status.HTTP_200_OK)
+            
+        except Booking.DoesNotExist:
+            return Response({"error": "Booking not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"error": "Payment recording failed"}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def confirm_cash_booking(request):
+    """
+    Confirm a booking with Cash (Pay at Hotel) method
+    """
+    from ..models import Admin, Billing
+    is_admin = request.user and request.user.is_authenticated and isinstance(request.user, Admin)
+    if not is_admin:
+        return Response(
+            {"error": "Cash/non-advance bookings are only allowed for Admins. Customers must make a minimum 15% advance payment online."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    booking_id = request.data.get("booking_id")
+
+    try:
+        auth_user_id = get_auth_user(request)
+        booking = Booking.objects.get(booking_id=booking_id)
+        booking.booking_status = "confirmed"
+        
+        # Create Billing Record for Cash
+        billing_id = generate_billing_no()
+        b_nums = booking.payment_details.get("billing_numbers", [])
+        if not isinstance(b_nums, list): b_nums = []
+        if billing_id not in b_nums: b_nums.append(billing_id)
+        booking.payment_details = {
+            "amount": float(booking.payment_details.get("amount", 0)),
+            "status": "pending",
+            "billing_numbers": b_nums
+        }
+        booking.lastmodified_by = str(auth_user_id)
+        booking.lastmodified_date = timezone.now()
+        booking.save()
+
+        Billing.objects.create(
+            booking=booking,
+            billing_no=billing_id,
+            amount_paid=0, # Paid 0 initially for Pay at Hotel
+            payment_type="cash",
+            created_by=str(auth_user_id)
+        )
+        
+        # Send WhatsApp Confirmation
+        send_booking_confirmation(booking)
+        
+        return Response({"message": "Booking confirmed with Cash payment", "booking": BookingSerializer(booking).data}, status=status.HTTP_200_OK)
+    except Booking.DoesNotExist:
+        return Response({"error": "Booking not found"}, status=status.HTTP_404_NOT_FOUND)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def initiate_booking_payment(request, booking_id):
+    """
+    Initiate Razorpay order for an existing booking (e.g., from Track Stay or Profile)
+    """
+    try:
+        booking = Booking.objects.get(booking_id=booking_id)
+        amount = booking.payment_details.get("amount")
+
+        if not amount:
+            return Response({"error": "Booking amount not found"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create Razorpay Order
+        data = {
+            "amount": int(float(amount) * 100),
+            "currency": "INR",
+            "payment_capture": 1
+        }
+        
+        order = client.order.create(data=data)
+        return Response({
+            "order": order,
+            "booking": BookingSerializer(booking).data
+        }, status=status.HTTP_200_OK)
+
+    except Booking.DoesNotExist:
+        return Response({"error": "Booking not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
