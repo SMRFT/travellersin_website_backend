@@ -1,7 +1,13 @@
 from rest_framework import serializers
-from .models import Rooms, Event, Query, Booking, Customer, Company, Admin, EventBooking, Billing, Gallery, GalleryCategory
-from django.db.models import Sum
+from .models import Rooms, Event, Query, Booking, Customer, Company, Admin, EventBooking, Billing, Gallery, GalleryCategory, MenuItems
+from django.db.models import Sum, Q
 from django.utils import timezone
+
+
+class MenuItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MenuItems
+        fields = ["item_id", "item_name", "rate", "is_active"]
 
 
 class CompanySerializer(serializers.ModelSerializer):
@@ -215,6 +221,7 @@ class BookingSerializer(serializers.ModelSerializer):
                 "billing_no": b.billing_no,
                 "amount_paid": b.amount_paid,
                 "payment_type": b.payment_type,
+                "card_type": getattr(b, 'card_type', None),
                 "status": b.status,
                 "transaction_id": b.transaction_id,
                 "date": b.created_date
@@ -355,7 +362,8 @@ class BookingSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        from .models import sync_or_create_customer, sync_or_create_company
+        from .Views.customers import sync_or_create_customer
+        from .Views.companies import sync_or_create_company
         
         g_name = validated_data.pop('guest_name', None)
         g_phone = validated_data.pop('guest_phone', None)
@@ -472,30 +480,93 @@ class BookingSerializer(serializers.ModelSerializer):
         if not check_in or not check_out:
             raise serializers.ValidationError("Check-in and check-out dates are required")
 
+        if timezone.is_naive(check_in):
+            check_in = timezone.make_aware(check_in)
+        if timezone.is_naive(check_out):
+            check_out = timezone.make_aware(check_out)
+
         if check_in >= check_out:
             raise serializers.ValidationError("Check-out must be after check-in")
 
-        # Check availability for each room using room_details
+        now_dt = timezone.now()
+        from datetime import timedelta
+        is_immediate = (check_in <= now_dt)
+        recent_threshold = now_dt - timedelta(days=2)
+
+        ACTIVE_STATUSES = [
+            "confirmed", "Confirmed",
+            "checked_in", "checked in", "Checked In", "Checked_In",
+            "pending", "Pending", "pending_confirmation", "pending confirmation",
+            "booked", "Booked"
+        ]
+
+        # Fetch recent and upcoming active bookings
         potential_overlaps = list(Booking.objects.filter(
-            check_in__lt=check_out,
-            check_out__gt=check_in,
-            booking_status__in=["confirmed", "pending", "checked_in", "checked in", "Confirmed", "Pending", "Checked In"]
+            booking_status__in=ACTIVE_STATUSES
         ))
         if instance:
             potential_overlaps = [b for b in potential_overlaps if b.pk != instance.pk]
 
         for b in potential_overlaps:
-            b_r_details = b.room_details or []
             b_st = str(b.booking_status or '').lower().replace('_', ' ').strip()
             if b_st in ["checked out", "cancelled", "canceled"]:
                 continue
+            if b_st not in ["confirmed", "checked in", "pending", "booked", "pending confirmation"]:
+                continue
+
+            b_check_in = b.check_in
+            b_check_out = b.check_out
+            if not b_check_in or not b_check_out:
+                continue
+            if timezone.is_naive(b_check_in):
+                b_check_in = timezone.make_aware(b_check_in)
+            if timezone.is_naive(b_check_out):
+                b_check_out = timezone.make_aware(b_check_out)
+
+            # Check if this booking actually overlaps with the requested date range [check_in, check_out]
+            is_date_overlap = (b_check_in < check_out and b_check_out > check_in)
+
+            # If the booking's scheduled checkout has already passed:
+            if b_check_out <= now_dt:
+                # It only occupies the room if the guest actually checked in and has NOT checked out yet
+                is_inhouse = (b_st in ['checked in', 'occupied'] or (b.guest_check_in is not None and b.guest_check_out is None))
+                if not is_inhouse:
+                    continue
+
+            # If it's an immediate booking right now and the room has an active in-house guest who hasn't checked out:
+            is_inhouse_overstay = (
+                is_immediate and
+                b.guest_check_in is not None and
+                b.guest_check_out is None and
+                recent_threshold <= b_check_in <= now_dt and
+                b_check_out <= now_dt
+            )
+
+            if not (is_date_overlap or is_inhouse_overstay):
+                continue
+
+            # Parse room details of the conflicting booking
+            b_r_details = b.room_details or []
+            if isinstance(b_r_details, str):
+                try:
+                    import json
+                    b_r_details = json.loads(b_r_details)
+                except Exception:
+                    b_r_details = []
+
             for active_r in clean_room_objs:
                 room_no = str(active_r["roomNo"]).strip()
                 if active_r.get("isActive", True):
+                    # Check room_details list
                     for b_r in b_r_details:
                         b_r_no = str(b_r.get("roomNo") if isinstance(b_r, dict) else b_r).strip()
                         b_is_active = b_r.get("isActive", True) if isinstance(b_r, dict) else True
                         if b_r_no == room_no and b_is_active:
+                            raise serializers.ValidationError(f"Room {room_no} already booked for this date range (Conflict: {b.booking_id})")
+                    # Check room_numbers field fallback
+                    if b.room_numbers:
+                        booked_rn = [r.strip() for r in str(b.room_numbers).strip(',').split(',') if r.strip()]
+                        if room_no in booked_rn:
                             raise serializers.ValidationError(f"Room {room_no} already booked for this date range (Conflict: {b.booking_id})")
 
         # Assign normalized room_details
@@ -610,15 +681,10 @@ class BookingSerializer(serializers.ModelSerializer):
         # Remove rent_details
         ret.pop('rent_details', None)
 
-        # Sanitize payment_details: only retain amount, status, billing_numbers
+        # Clean and expose payment_details
         raw_pd = clean_value(getattr(instance, 'payment_details', None)) or {}
         if isinstance(raw_pd, dict):
-            unwanted_keys = [
-                'method', 'paid', 'amount_paid', 'latest_billing_no',
-                'transaction_id', 'latest_transaction_id', 'payment_type', 'date'
-            ]
-            clean_pd = {k: v for k, v in raw_pd.items() if k not in unwanted_keys}
-            ret['payment_details'] = clean_pd
+            ret['payment_details'] = dict(raw_pd)
         else:
             ret['payment_details'] = {}
 
@@ -764,6 +830,19 @@ class BillingSerializer(serializers.ModelSerializer):
     guest_phone = serializers.SerializerMethodField()
     guest_email = serializers.SerializerMethodField()
     room_numbers = serializers.SerializerMethodField()
+    company_name = serializers.SerializerMethodField()
+    company_gst = serializers.SerializerMethodField()
+    state = serializers.SerializerMethodField()
+    tax_details = serializers.SerializerMethodField()
+    discount_amount = serializers.SerializerMethodField()
+    discount_remarks = serializers.SerializerMethodField()
+    check_in = serializers.SerializerMethodField()
+    check_out = serializers.SerializerMethodField()
+    guest_check_in = serializers.SerializerMethodField()
+    guest_check_out = serializers.SerializerMethodField()
+    booking_status = serializers.SerializerMethodField()
+    booking_source = serializers.SerializerMethodField()
+    round_off = serializers.SerializerMethodField()
 
     class Meta:
         model = Billing
@@ -814,6 +893,113 @@ class BillingSerializer(serializers.ModelSerializer):
             return obj.booking.room_numbers
         except Exception:
             return "N/A"
+
+    def get_company_name(self, obj):
+        try:
+            comp = obj.booking.company_details or {}
+            return comp.get("company_name", "") or ""
+        except Exception:
+            return ""
+
+    def get_company_gst(self, obj):
+        try:
+            comp = obj.booking.company_details or {}
+            return comp.get("gst_no", "") or comp.get("company_gst", "") or ""
+        except Exception:
+            return ""
+
+    def get_state(self, obj):
+        try:
+            comp = obj.booking.company_details or {}
+            return comp.get("state", "Tamil Nadu") or "Tamil Nadu"
+        except Exception:
+            return "Tamil Nadu"
+
+    def get_tax_details(self, obj):
+        try:
+            if obj.booking and obj.booking.tax_details:
+                td = obj.booking.tax_details
+                if isinstance(td, str):
+                    import json
+                    td = json.loads(td)
+                if isinstance(td, dict) and td:
+                    return td
+            if obj.booking:
+                total = float(getattr(obj.booking, 'total_amount', 0) or (obj.booking.payment_details or {}).get('amount', 0) or obj.amount_paid or 0)
+                if total > 0:
+                    taxable = round(total / 1.05, 2)
+                    ttax = round(total - taxable, 2)
+                    cgst = round(ttax / 2, 2)
+                    sgst = round(ttax - cgst, 2)
+                    return {
+                        "bill_type": getattr(obj.booking, 'bill_type', 'Rack') or 'Rack',
+                        "subtotal": total,
+                        "taxable_amount": taxable,
+                        "cgst_rate": 2.5,
+                        "cgst_amount": cgst,
+                        "sgst_rate": 2.5,
+                        "sgst_amount": sgst,
+                        "total_tax": ttax,
+                        "round_off": float(getattr(obj.booking, 'round_off', 0) or 0),
+                        "gross_total": total
+                    }
+            return {}
+        except Exception:
+            return {}
+
+    def get_discount_amount(self, obj):
+        try:
+            return float(obj.booking.discount_amount or 0)
+        except Exception:
+            return 0
+
+    def get_discount_remarks(self, obj):
+        try:
+            return obj.booking.discount_remarks or ""
+        except Exception:
+            return ""
+
+    def get_guest_check_in(self, obj):
+        try:
+            return obj.booking.guest_check_in or obj.booking.check_in
+        except Exception:
+            return None
+
+    def get_guest_check_out(self, obj):
+        try:
+            return obj.booking.guest_check_out or obj.booking.check_out
+        except Exception:
+            return None
+
+    def get_check_in(self, obj):
+        try:
+            return obj.booking.guest_check_in or obj.booking.check_in
+        except Exception:
+            return None
+
+    def get_check_out(self, obj):
+        try:
+            return obj.booking.guest_check_out or obj.booking.check_out
+        except Exception:
+            return None
+
+    def get_booking_status(self, obj):
+        try:
+            return obj.booking.booking_status or "confirmed"
+        except Exception:
+            return "confirmed"
+
+    def get_booking_source(self, obj):
+        try:
+            return obj.booking.booking_source or "walk_in"
+        except Exception:
+            return "walk_in"
+
+    def get_round_off(self, obj):
+        try:
+            return float(obj.booking.round_off or (obj.booking.tax_details or {}).get("round_off", 0) or 0)
+        except Exception:
+            return 0.0
 
 class GalleryCategorySerializer(serializers.ModelSerializer):
     id = serializers.SerializerMethodField()
@@ -873,3 +1059,10 @@ class GallerySerializer(serializers.ModelSerializer):
                 uri = uri.replace('http://', 'https://')
             return uri
         return path
+
+
+class MenuItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        from .models import MenuItems
+        model = MenuItems
+        fields = ["item_id", "item_name", "rate", "is_active"]

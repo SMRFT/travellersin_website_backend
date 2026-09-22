@@ -77,16 +77,39 @@ def upload_room_image(request):
         "filename": filename,
         "id": str(file_id)
     }, status=status.HTTP_201_CREATED)
+from django.views.decorators.clickjacking import xframe_options_exempt
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+@xframe_options_exempt
 def serve_gridfs_file(request, file_id):
     try:
         from django.http import FileResponse
         fs = get_gridfs()
         # Clean the file_id - strip trailing slash if it came through str pattern
-        clean_id = file_id.strip('/')
+        clean_id = str(file_id).strip('/')
         grid_out = fs.get(ObjectId(clean_id))
         
-        response = FileResponse(grid_out, content_type=grid_out.content_type)
-        response['Content-Disposition'] = f'inline; filename="{grid_out.filename}"'
+        ct = grid_out.content_type
+        if not ct or ct == "application/octet-stream":
+            fn = (grid_out.filename or "").lower()
+            if fn.endswith(".pdf"):
+                ct = "application/pdf"
+            elif fn.endswith(".png"):
+                ct = "image/png"
+            elif fn.endswith((".jpg", ".jpeg")):
+                ct = "image/jpeg"
+            elif fn.endswith(".webp"):
+                ct = "image/webp"
+            else:
+                ct = "application/pdf"
+
+        response = FileResponse(grid_out, content_type=ct)
+        response['Content-Disposition'] = f'inline; filename="{grid_out.filename or clean_id}"'
+        response['X-Frame-Options'] = 'ALLOWALL'
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response['Access-Control-Allow-Headers'] = '*'
         return response
     except Exception as e:
-        raise Http404("File not found")
+        raise Http404(f"File not found: {e}")

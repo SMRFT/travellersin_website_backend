@@ -146,17 +146,22 @@ def bookings_list_create(request):
         if serializer.is_valid():
             booking = serializer.save(created_by=str(auth_user_id))
             
-            # If initial payment was recorded, create a Billing record
+            # Only create official billing record if amount_paid is a valid positive number
             raw_pd = request.data.get("payment_details") or {}
-            amount_paid = float(request.data.get("amount_paid") or raw_pd.get("amount_paid", raw_pd.get("paid", 0)))
+            amount_paid = float(request.data.get("amount_paid") or raw_pd.get("amount_paid", raw_pd.get("paid", 0)) or 0)
             
+            total_amt = float(getattr(booking, 'total_amount', None) or ((booking.tax_details or {}).get("gross_total") if isinstance(booking.tax_details, dict) else 0) or (booking.payment_details.get("amount", 0) if isinstance(booking.payment_details, dict) else 0) or 0)
+            net_payable = max(0.0, total_amt - float(booking.discount_amount or 0))
+            b_nums = []
+
             if amount_paid > 0:
                 from ..models import Billing
                 from .payments import generate_billing_no
                 
-                billing_no = generate_billing_no()
+                billing_no = generate_billing_no(booking.created_date or timezone.now())
                 p_type = request.data.get("payment_type") or raw_pd.get("payment_type") or raw_pd.get("method") or "cash"
                 t_id = request.data.get("transaction_id") or raw_pd.get("transaction_id")
+                c_type = request.data.get("card_type") or raw_pd.get("card_type")
                 
                 try:
                     Billing.objects.create(
@@ -164,28 +169,31 @@ def bookings_list_create(request):
                         booking=booking,
                         amount_paid=amount_paid,
                         payment_type=p_type,
+                        card_type=c_type,
                         transaction_id=t_id,
                         created_by=str(auth_user_id)
                     )
-                    
-                    # Update billing_numbers in booking
-                    b_nums = booking.payment_details.get("billing_numbers", [])
-                    if not isinstance(b_nums, list):
-                        b_nums = []
-                    if billing_no not in b_nums:
-                        b_nums.append(billing_no)
-                    
-                    booking.payment_details = {
-                        "amount": float(booking.payment_details.get("amount", 0)),
-                        "status": "paid" if amount_paid >= float(booking.payment_details.get("amount", 0)) else "partially_paid",
-                        "billing_numbers": b_nums
-                    }
-                    booking.lastmodified_by = str(auth_user_id)
-                    booking.lastmodified_date = timezone.now()
-                    booking.save()
+                    b_nums.append(billing_no)
                 except Exception as e:
                     print(f"Error creating initial billing record: {e}")
+                
+            p_status = "paid" if (amount_paid >= net_payable and net_payable > 0) else ("partially_paid" if amount_paid > 0 else "pending")
             
+            booking.payment_details = {
+                "amount": total_amt,
+                "status": p_status,
+                "billing_numbers": b_nums
+            }
+            booking.lastmodified_by = str(auth_user_id)
+            booking.lastmodified_date = timezone.now()
+            booking.save()
+            
+            try:
+                from .notifications import broadcast_booking_notification
+                broadcast_booking_notification()
+            except Exception as e:
+                print(f"Error broadcasting booking SSE: {e}")
+                
             return Response(BookingSerializer(booking).data, status=201)
         return Response(serializer.errors, status=400)
 
@@ -204,8 +212,53 @@ def booking_detail_update(request, booking_id):
         auth_user_id = get_auth_user(request)
         serializer = BookingSerializer(booking, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save(lastmodified_by=str(auth_user_id), lastmodified_date=timezone.now())
-            return Response(serializer.data)
+            booking = serializer.save(lastmodified_by=str(auth_user_id), lastmodified_date=timezone.now())
+            
+            # Check if payment update / billing was passed in PATCH
+            raw_pd = request.data.get("payment_details") or {}
+            amt_paid_in_req = request.data.get("amount_paid") or raw_pd.get("amount_paid") or raw_pd.get("paid")
+            if amt_paid_in_req is not None:
+                try:
+                    amt_num = float(amt_paid_in_req)
+                    existing_paid = sum(float(b.amount_paid or 0) for b in booking.bills.all())
+                    
+                    if amt_num > 0 and amt_num != existing_paid:
+                        from ..models import Billing
+                        from .payments import generate_billing_no
+                        
+                        bill_no = generate_billing_no(timezone.now())
+                        p_type = request.data.get("payment_type") or raw_pd.get("payment_type") or raw_pd.get("method") or "cash"
+                        t_id = request.data.get("transaction_id") or raw_pd.get("transaction_id")
+                        c_type = request.data.get("card_type") or raw_pd.get("card_type")
+                        
+                        Billing.objects.create(
+                            billing_no=bill_no,
+                            booking=booking,
+                            amount_paid=amt_num,
+                            payment_type=p_type,
+                            card_type=c_type,
+                            transaction_id=t_id,
+                            created_by=str(auth_user_id)
+                        )
+                        
+                        b_nums = [b.billing_no for b in booking.bills.all() if float(b.amount_paid or 0) > 0 and b.billing_no]
+                        if bill_no not in b_nums:
+                            b_nums.append(bill_no)
+                        
+                        new_total_paid = existing_paid + amt_num
+                        total_amt = float(getattr(booking, 'total_amount', None) or ((booking.tax_details or {}).get("gross_total") if isinstance(booking.tax_details, dict) else 0) or (booking.payment_details.get("amount", 0) if isinstance(booking.payment_details, dict) else 0) or 0)
+                        net_payable = max(0.0, total_amt - float(booking.discount_amount or 0))
+                        
+                        booking.payment_details = {
+                            "amount": total_amt,
+                            "status": "paid" if (new_total_paid >= net_payable and net_payable > 0) else ("partially_paid" if new_total_paid > 0 else "pending"),
+                            "billing_numbers": b_nums
+                        }
+                        booking.save()
+                except Exception as e:
+                    print(f"Error updating billing in patch: {e}")
+
+            return Response(BookingSerializer(booking).data)
         return Response(serializer.errors, status=400)
 @api_view(["GET"])
 def track_booking(request):
@@ -233,9 +286,12 @@ def cancel_booking(request, booking_id):
         return Response({"error": "Cancellation window (24h from booking) has expired"}, status=400)
 
     auth_user_id = get_auth_user(request)
-    reason = request.data.get("reason", "Cancelled by guest")
+    reason = request.data.get("reason") or request.data.get("cancellation_reason")
+    if not reason or not str(reason).strip():
+        return Response({"error": "Cancellation reason is mandatory."}, status=400)
+
     booking.booking_status = "cancellation_requested"
-    booking.cancellation_reason = reason
+    booking.cancellation_reason = str(reason).strip()
     booking.lastmodified_by = str(auth_user_id)
     booking.lastmodified_date = timezone.now()
     booking.save()
