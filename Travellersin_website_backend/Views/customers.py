@@ -27,11 +27,24 @@ def sync_or_create_customer(name=None, phone=None, email=None, address=None, com
         return None
     
     customer = None
-    if customer_id:
-        customer = get_model_first(Customer.objects.filter(customer_id=customer_id))
-    if not customer and phone:
-        customer = get_model_first(Customer.objects.filter(phone=str(phone).strip()))
+    # 1. If explicit customer_id is provided (selected from registered customers dropdown), reuse it!
+    if customer_id and str(customer_id).strip() and str(customer_id).strip().lower() not in ["none", "null", "undefined", ""]:
+        customer = get_model_first(Customer.objects.filter(customer_id=str(customer_id).strip()))
+        if customer:
+            if name: customer.name = name
+            if phone: customer.phone = str(phone).strip()
+            if email is not None and str(email).strip(): customer.email = email
+            if address is not None and str(address).strip(): customer.address = address
+            if id_proof_type: customer.id_proof_type = id_proof_type
+            if id_proof_number: customer.id_proof_number = id_proof_number
+            if id_proof_file: customer.id_proof_file = id_proof_file
+            customer.lastmodified_by = str(lastmodified_by) if lastmodified_by else "user"
+            customer.lastmodified_date = timezone.now()
+            customer.save()
+            return customer
         
+    # 2. If no customer_id provided or not found, ALWAYS create a new separate Customer document.
+    # Do NOT match or patch existing customer records by phone, as same phone can belong to multiple users.
     if not customer:
         customer_id_new = generate_customer_id()
         customer = Customer(
@@ -47,30 +60,6 @@ def sync_or_create_customer(name=None, phone=None, email=None, address=None, com
             created_by=str(created_by) if created_by else "user"
         )
         customer.save()
-    else:
-        changed = False
-        if name and (not customer.name or customer.name == "Guest"):
-            customer.name = name
-            changed = True
-        if email and not customer.email:
-            customer.email = email
-            changed = True
-        if address and not customer.address:
-            customer.address = address
-            changed = True
-        if id_proof_type and not customer.id_proof_type:
-            customer.id_proof_type = id_proof_type
-            changed = True
-        if id_proof_number and not customer.id_proof_number:
-            customer.id_proof_number = id_proof_number
-            changed = True
-        if id_proof_file and not customer.id_proof_file:
-            customer.id_proof_file = id_proof_file
-            changed = True
-        if changed:
-            customer.lastmodified_by = str(lastmodified_by) if lastmodified_by else "user"
-            customer.lastmodified_date = timezone.now()
-            customer.save()
             
     return customer
 

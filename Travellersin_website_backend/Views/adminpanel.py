@@ -114,6 +114,37 @@ def admin_dashboard(request):
         "active_events": EventBooking.objects.filter(status="pending").count()
     })
 
+@api_view(["GET"])
+@permission_classes([HasRolePermission])
+def admin_notifications(request):
+    """
+    Lightweight endpoint returning only online pending bookings for TopBar notifications
+    """
+    online_bookings = [
+        b for b in Booking.objects.all()
+        if (
+            str(getattr(b, "booking_source", "")).lower().strip() in ["online", "website"]
+            or str(getattr(b, "created_type", "")).lower().strip() == "customer"
+        )
+        and str(getattr(b, "booking_status", "") or getattr(b, "status", "")).lower().replace("_", " ").strip() == "pending"
+    ]
+    data = []
+    for b in online_bookings:
+        amt = getattr(b, "amount", None)
+        if amt is None and isinstance(getattr(b, "payment_details", None), dict):
+            amt = b.payment_details.get("amount")
+        data.append({
+            "booking_id": b.booking_id or getattr(b, "id", None),
+            "id": b.booking_id or getattr(b, "id", None),
+            "guest_name": b.guest_name,
+            "guest_phone": b.guest_phone,
+            "check_in": b.check_in,
+            "amount": amt,
+            "booking_source": b.booking_source or "online",
+            "booking_status": b.booking_status or "pending",
+        })
+    return Response(data)
+
 @api_view(["PATCH"])
 @permission_classes([HasRolePermission])
 def update_booking_status(request, booking_id):
@@ -179,6 +210,18 @@ def update_booking_status(request, booking_id):
                         item['isCleaned'] = False
             booking.room_details = r_details
 
+        elif status_norm in ["cancelled", "canceled"]:
+            # Cancelled booking: mark isActive=False on all rooms
+            r_details = booking.room_details or []
+            if not r_details and booking.room_numbers:
+                rn_list = [r.strip() for r in str(booking.room_numbers).strip(",").split(",") if r.strip()]
+                r_details = [{"roomNo": r, "isActive": False, "isCleaned": None} for r in rn_list]
+            else:
+                for item in r_details:
+                    if isinstance(item, dict):
+                        item['isActive'] = False
+            booking.room_details = r_details
+
         elif status_norm in ["confirmed", "checked in", "checked_in"]:
             # Record actual guest checkin datetime if status is checked in
             if status_norm in ["checked in", "checked_in"] and not booking.guest_check_in:
@@ -193,7 +236,13 @@ def update_booking_status(request, booking_id):
 
         booking.booking_status = status_clean
         if status_norm in ["cancelled", "canceled"]:
-            booking.cancellation_reason = request.data.get("cancellation_reason", "Cancelled by Admin")
+            cancellation_reason = request.data.get("cancellation_reason") or request.data.get("reason")
+            if not cancellation_reason or not str(cancellation_reason).strip():
+                return Response(
+                    {"error": "Cancellation reason is mandatory when cancelling a booking."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            booking.cancellation_reason = str(cancellation_reason).strip()
             refund_type = request.data.get("refund_type", "auto")
             
             # --- START REFUND LOGIC ---
@@ -298,8 +347,6 @@ def update_booking_status(request, booking_id):
         # 2. Handle Payment Details & Recording
         raw_pd = request.data.get("payment_details")
         p_details = dict(booking.payment_details or {})
-        if isinstance(raw_pd, dict):
-            p_details.update({k: v for k, v in raw_pd.items() if k in ['amount', 'status', 'billing_numbers']})
 
         new_paid = request.data.get("amount_paid")
         if new_paid is None and isinstance(raw_pd, dict):
@@ -320,66 +367,79 @@ def update_booking_status(request, booking_id):
         _tid = request.data.get("transaction_id") or (raw_pd.get("transaction_id") if isinstance(raw_pd, dict) else None)
         t_id = _tid if (_tid is not None and str(_tid).strip() != '') else None
 
+        _card_type = request.data.get("card_type") or (raw_pd.get("card_type") if isinstance(raw_pd, dict) else None)
+        card_type = _card_type if (_card_type is not None and str(_card_type).strip() != '') else None
+
         manual_p_status = request.data.get("payment_status") or (raw_pd.get("status") if isinstance(raw_pd, dict) else None)
 
         if new_paid is not None and float(new_paid) > 0:
             try:
                 amt_to_add = float(new_paid)
-                current_total = float(p_details.get("amount", 0) or (raw_pd.get("amount") if isinstance(raw_pd, dict) else 0) or 0)
+                current_total = float(p_details.get("amount", 0) or (raw_pd.get("amount") if isinstance(raw_pd, dict) else 0) or getattr(booking, "total_amount", 0) or ((booking.tax_details or {}).get("gross_total") if isinstance(booking.tax_details, dict) else 0) or 0)
                 
                 existing_paid = sum(float(b.amount_paid or 0) for b in booking.bills.all())
                 new_total_paid = existing_paid + amt_to_add
 
                 net_payable = max(0.0, current_total - float(booking.discount_amount or 0))
-                if not manual_p_status:
-                    if new_total_paid >= net_payable and net_payable > 0:
-                        p_details["status"] = "paid"
-                    elif new_total_paid > 0:
-                        p_details["status"] = "partially_paid"
-                    else:
-                        p_details["status"] = "pending"
+                if manual_p_status:
+                    p_status = manual_p_status
+                elif new_total_paid >= net_payable and net_payable > 0:
+                    p_status = "paid"
+                elif new_total_paid > 0:
+                    p_status = "partially_paid"
                 else:
-                    p_details["status"] = manual_p_status
+                    p_status = "pending"
 
                 from .payments import generate_billing_no
-                bill_no = generate_billing_no()
+                bill_no = generate_billing_no(timezone.now())
 
-                try:
-                    Billing.objects.create(
-                        billing_no=bill_no,
-                        booking=booking,
-                        amount_paid=amt_to_add,
-                        payment_type=p_type,
-                        transaction_id=t_id,
-                        created_by=str(auth_user_id)
-                    )
+                Billing.objects.create(
+                    billing_no=bill_no,
+                    booking=booking,
+                    amount_paid=amt_to_add,
+                    payment_type=p_type,
+                    card_type=card_type,
+                    transaction_id=t_id,
+                    created_by=str(auth_user_id)
+                )
 
-                    if "billing_numbers" not in p_details or not isinstance(p_details["billing_numbers"], list):
-                        p_details["billing_numbers"] = []
-                    if bill_no not in p_details["billing_numbers"]:
-                        p_details["billing_numbers"].append(bill_no)
-                except Exception as b_err:
-                    print(f"Billing record creation failed: {b_err}")
+                b_nums = p_details.get("billing_numbers", []) if isinstance(p_details.get("billing_numbers"), list) else []
+                if bill_no not in b_nums:
+                    b_nums.append(bill_no)
 
-            except (ValueError, TypeError) as e:
-                print(f"Amount calculation failed: {e}")
+                booking.payment_details = {
+                    "amount": current_total,
+                    "status": p_status,
+                    "billing_numbers": b_nums
+                }
+            except Exception as b_err:
+                print(f"Billing record creation failed: {b_err}")
+                import traceback
+                traceback.print_exc()
+        else:
+            # Sync existing billing numbers only from bills with amount_paid > 0
+            b_nums = [b.billing_no for b in booking.bills.all() if float(b.amount_paid or 0) > 0 and b.billing_no]
+            
+            amt_val = float(p_details.get("amount", 0) or (raw_pd.get("amount") if isinstance(raw_pd, dict) else 0) or getattr(booking, "total_amount", 0) or ((booking.tax_details or {}).get("gross_total") if isinstance(booking.tax_details, dict) else 0) or 0)
+            st_val = manual_p_status or p_details.get("status") or (raw_pd.get("status") if isinstance(raw_pd, dict) else "pending")
 
-        # Strip transient fields from p_details before saving
-        if isinstance(p_details, dict):
-            unwanted_keys = [
-                'method', 'paid', 'amount_paid', 'latest_billing_no',
-                'transaction_id', 'latest_transaction_id', 'payment_type', 'date'
-            ]
-            for k in unwanted_keys:
-                p_details.pop(k, None)
+            booking.payment_details = {
+                "amount": amt_val,
+                "status": st_val,
+                "billing_numbers": b_nums
+            }
 
-        # Apply finally
-        booking.payment_details = p_details
         booking.save()
 
         # 3. WhatsApp Integration
         if booking.booking_status == "confirmed":
             send_booking_confirmation(booking)
+
+        try:
+            from .notifications import broadcast_booking_notification
+            broadcast_booking_notification()
+        except Exception as e:
+            print(f"Error broadcasting booking SSE: {e}")
 
         return Response({
             "message": "Booking updated successfully", 
@@ -496,6 +556,12 @@ def approve_cancellation(request, booking_id):
             booking.payment_details = payment_details
 
         booking.booking_status = "cancelled"
+        r_details = booking.room_details or []
+        if isinstance(r_details, list):
+            for item in r_details:
+                if isinstance(item, dict):
+                    item['isActive'] = False
+            booking.room_details = r_details
         booking.save()
         
         return Response({
@@ -611,19 +677,22 @@ def admin_room_availability(request):
         except Exception:
             pass
 
-        # 1. Fetch active bookings covering target date
-        booking_query = (
-            Q(booking_status__in=["confirmed", "Confirmed", "checked_in", "checked in", "Checked In", "Checked_In"]) &
-            Q(check_in__lt=target_end) &
-            Q(check_out__gt=target_start)
-        )
-        if exclude_booking_id:
-            booking_query = booking_query & ~Q(booking_id=exclude_booking_id)
+        ACTIVE_STATUSES = [
+            "confirmed", "Confirmed",
+            "checked_in", "checked in", "Checked In", "Checked_In",
+            "pending", "Pending", "pending_confirmation",
+            "booked", "Booked"
+        ]
 
-        active_bookings = list(Booking.objects.filter(booking_query))
+        now_dt = timezone.now()
+        is_immediate = (target_start <= now_dt)
+        from datetime import timedelta
+        recent_threshold = now_dt - timedelta(days=2)
 
-        # 2. Fetch recent bookings to evaluate cleaning status
-        all_recent_bookings = list(Booking.objects.all().order_by('-created_date')[:50])
+        # 1. Fetch active bookings for overlap checking
+        all_active_bookings = list(Booking.objects.filter(booking_status__in=ACTIVE_STATUSES))
+        # Also fetch recent bookings for cleaning state inspection
+        all_recent_bookings = list(Booking.objects.all().order_by('-created_date')[:100])
 
         availability_data = []
 
@@ -646,44 +715,120 @@ def admin_room_availability(request):
                     "status_label": "Under Maintenance",
                     "color": "black",
                     "color_code": "#1F2937",
-                    "current_booking": None
+                    "current_booking": None,
+                    "booking_details": None
                 })
                 continue
 
-            # Check if occupied by an active booking
+            # Check if occupied/booked by an active booking
             matched_booking = None
-            for b in active_bookings:
-                r_details = b.room_details or []
-                for item in r_details:
-                    if isinstance(item, dict):
-                        if str(item.get('roomNo')).strip() == r_num_str and item.get('isActive', True):
-                            matched_booking = b
-                            break
-                    elif str(item).strip() == r_num_str:
-                        matched_booking = b
+            for b in all_active_bookings:
+                if exclude_booking_id and str(b.booking_id) == str(exclude_booking_id):
+                    continue
+                b_st = str(b.booking_status or '').lower().replace('_', ' ').strip()
+                if b_st in ['checked out', 'cancelled', 'canceled']:
+                    continue
+                if b_st not in ['confirmed', 'checked in', 'pending', 'booked', 'pending confirmation']:
+                    continue
+
+                # Check if this room is in this booking and active
+                has_room = False
+                for item in (b.room_details or []):
+                    if isinstance(item, dict) and str(item.get('roomNo')).strip() == r_num_str and item.get('isActive', True):
+                        has_room = True
                         break
-                if matched_booking:
+                    elif str(item).strip() == r_num_str:
+                        has_room = True
+                        break
+                if not has_room:
+                    continue
+
+                b_check_in = b.check_in
+                b_check_out = b.check_out
+                if not b_check_in or not b_check_out:
+                    continue
+                if timezone.is_naive(b_check_in):
+                    b_check_in = timezone.make_aware(b_check_in)
+                if timezone.is_naive(b_check_out):
+                    b_check_out = timezone.make_aware(b_check_out)
+
+                # Check overlap against target time range
+                is_overlapping = (b_check_in < target_end and b_check_out > target_start)
+
+                # If scheduled checkout has already passed in real-time:
+                if b_check_out <= now_dt:
+                    is_inhouse = (b_st in ['checked in', 'occupied'] or (b.guest_check_in is not None and b.guest_check_out is None))
+                    if not is_inhouse:
+                        continue
+
+                # In-house overstay (only applies if target is today/now and guest checked in in past and overstayed past checkout)
+                is_inhouse_overstay = (
+                    is_immediate and
+                    b.guest_check_in is not None and
+                    b.guest_check_out is None and
+                    recent_threshold <= b_check_in <= now_dt and
+                    b_check_out <= now_dt
+                )
+
+                if is_overlapping or is_inhouse_overstay:
+                    matched_booking = b
                     break
 
-            # Case 2: Occupied (Blue)
+            # Case 2: Occupied / Booked
             if matched_booking:
+                b_st = str(matched_booking.booking_status or '').lower().replace('_', ' ').strip()
+                is_pending = b_st in ["pending", "pending confirmation"]
+                is_checked_in = (b_st in ["checked in", "occupied"] or matched_booking.guest_check_in is not None)
+
+                # If checking for today/immediate and guest is in-house:
+                if is_checked_in:
+                    st_val = "occupied"
+                    st_lbl = "Occupied"
+                    c_name = "red"
+                    c_code = "#EF4444"
+                elif is_pending:
+                    st_val = "booked"
+                    st_lbl = "Booked (Pending)"
+                    c_name = "blue"
+                    c_code = "#3B82F6"
+                else:
+                    st_val = "booked"
+                    st_lbl = "Booked"
+                    c_name = "blue"
+                    c_code = "#3B82F6"
+
+                g_name = matched_booking.guest_name or ""
+                g_phone = matched_booking.guest_phone or ""
+                if not g_name and matched_booking.customer:
+                    g_name = getattr(matched_booking.customer, 'name', '') or ""
+                    g_phone = getattr(matched_booking.customer, 'phone', '') or ""
+
+                b_dict = {
+                    "booking_id": matched_booking.booking_id,
+                    "guest_name": g_name,
+                    "guest_phone": g_phone,
+                    "check_in": matched_booking.check_in.isoformat() if matched_booking.check_in else None,
+                    "check_out": matched_booking.check_out.isoformat() if matched_booking.check_out else None,
+                    "guest_check_in": matched_booking.guest_check_in.isoformat() if matched_booking.guest_check_in else None,
+                    "guest_check_out": matched_booking.guest_check_out.isoformat() if matched_booking.guest_check_out else None,
+                    "status": matched_booking.booking_status
+                }
+
                 availability_data.append({
                     "room_number": room.room_number,
                     "room_type": room.room_type,
                     "price": r_price,
                     "size": r_size,
-                    "status": "occupied",
-                    "status_label": "Occupied",
-                    "color": "blue",
-                    "color_code": "#3B82F6",
-                    "current_booking": {
-                        "booking_id": matched_booking.booking_id,
-                        "guest_name": matched_booking.guest_name,
-                        "guest_phone": matched_booking.guest_phone,
-                        "check_in": matched_booking.check_in,
-                        "check_out": matched_booking.check_out,
-                        "status": matched_booking.booking_status
-                    }
+                    "status": st_val,
+                    "status_label": st_lbl,
+                    "color": c_name,
+                    "color_code": c_code,
+                    "current_booking": b_dict,
+                    "booking_details": b_dict,
+                    "guest_name": g_name,
+                    "guest_phone": g_phone,
+                    "check_in": matched_booking.check_in.isoformat() if matched_booking.check_in else None,
+                    "check_out": matched_booking.check_out.isoformat() if matched_booking.check_out else None,
                 })
                 continue
 

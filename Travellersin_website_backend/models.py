@@ -152,7 +152,7 @@ class Customer(AuditModel):
     )
 
     name = models.CharField(max_length=100)
-    phone = models.CharField(max_length=15, unique=True)
+    phone = models.CharField(max_length=25, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     address = models.TextField(blank=True, null=True)
 
@@ -382,22 +382,22 @@ class Booking(AuditModel):
                     })
             self.room_details = normalized_rd
 
-        # Enforce Payment Status Consistency & Strip Unwanted Fields
-        if self.payment_details:
+        # Enforce Payment Status Consistency & Preserve Clean Payment and Billing Fields
+        if self.payment_details is not None:
             try:
                 if isinstance(self.payment_details, str):
                     self.payment_details = json.loads(self.payment_details)
                 
                 if isinstance(self.payment_details, dict):
                     p_details = dict(self.payment_details)
-                    unwanted_keys = [
-                        'method', 'paid', 'amount_paid', 'latest_billing_no',
-                        'transaction_id', 'latest_transaction_id', 'payment_type', 'date'
-                    ]
-                    for k in unwanted_keys:
-                        p_details.pop(k, None)
                     
-                    total = float(p_details.get('amount', 0))
+                    total = float(p_details.get('amount', 0) or 0)
+                    if total == 0:
+                        if getattr(self, 'total_amount', None):
+                            total = float(self.total_amount or 0)
+                        elif isinstance(self.tax_details, dict) and self.tax_details.get('gross_total'):
+                            total = float(self.tax_details.get('gross_total') or 0)
+
                     discount = float(self.discount_amount or 0)
                     net_payable = max(0.0, total - discount)
                     
@@ -405,17 +405,31 @@ class Booking(AuditModel):
                     try:
                         paid = sum(float(b.amount_paid or 0) for b in self.bills.all())
                     except Exception:
+                        paid = float(p_details.get('paid', 0) or p_details.get('amount_paid', 0) or 0)
+
+                    status = p_details.get('status')
+                    if status not in ['refunded', 'refund_pending']:
+                        if paid >= net_payable and net_payable > 0:
+                            status = 'paid'
+                        elif paid > 0:
+                            status = 'partially_paid'
+                        elif not status:
+                            status = 'pending'
+
+                    # Sync billing numbers only from Billing objects that have amount_paid > 0
+                    b_nums = []
+                    try:
+                        for b in self.bills.all():
+                            if float(b.amount_paid or 0) > 0 and b.billing_no and b.billing_no not in b_nums:
+                                b_nums.append(b.billing_no)
+                    except Exception:
                         pass
 
-                    if p_details.get('status') not in ['refunded', 'refund_pending']:
-                        if paid >= net_payable and net_payable > 0:
-                            p_details['status'] = 'paid'
-                        elif paid > 0:
-                            p_details['status'] = 'partially_paid'
-                        elif not p_details.get('status'):
-                            p_details['status'] = 'pending'
-                    
-                    self.payment_details = p_details
+                    self.payment_details = {
+                        "amount": total,
+                        "status": status,
+                        "billing_numbers": b_nums
+                    }
             except (ValueError, TypeError, ImportError):
                 pass
 
@@ -518,6 +532,7 @@ class Billing(AuditModel):
     
     amount_paid = models.FloatField()
     payment_type = models.CharField(max_length=20, default='cash')
+    card_type = models.CharField(max_length=50, blank=True, null=True)
 
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
 
@@ -555,3 +570,26 @@ class Gallery(AuditModel):
 
     def __str__(self):
         return f"{self.category.name} - {self.title or self.image_id}"
+
+
+class MenuItems(models.Model):
+    item_id = models.IntegerField(primary_key=True)
+    item_name = models.CharField(max_length=100)
+    rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "Travellersin_website_backend_menuitems"
+
+    def __str__(self):
+        return f"{self.item_name} (₹{self.rate})"
+
+
+def sync_or_create_customer(*args, **kwargs):
+    from .Views.customers import sync_or_create_customer as _sync
+    return _sync(*args, **kwargs)
+
+
+def sync_or_create_company(*args, **kwargs):
+    from .Views.companies import sync_or_create_company as _sync
+    return _sync(*args, **kwargs)

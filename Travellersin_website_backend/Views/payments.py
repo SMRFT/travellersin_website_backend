@@ -136,14 +136,14 @@ def verify_payment(request):
             if billing_id not in billing_numbers:
                 billing_numbers.append(billing_id)
 
-            # Update Payment Details JSON structure: only amount, status, billing_numbers
+            # Update Payment Details JSON structure
             booking.payment_details = {
                 "amount": current_total,
                 "status": payment_status,
                 "billing_numbers": billing_numbers
             }
             
-            booking.booking_status = "confirmed"
+            booking.booking_status = "pending"
             booking.lastmodified_by = str(auth_user_id)
             booking.lastmodified_date = timezone.now()
             booking.save()
@@ -166,6 +166,12 @@ def verify_payment(request):
             
             # Send WhatsApp Confirmation
             send_booking_confirmation(booking)
+            
+            try:
+                from .notifications import broadcast_booking_notification
+                broadcast_booking_notification()
+            except Exception as e:
+                print(f"Error broadcasting booking SSE: {e}")
             
             return Response({"message": "Payment recorded and booking confirmed", "booking": BookingSerializer(booking).data}, status=status.HTTP_200_OK)
             
@@ -198,31 +204,25 @@ def confirm_cash_booking(request):
         booking = Booking.objects.get(booking_id=booking_id)
         booking.booking_status = "confirmed"
         
-        # Create Billing Record for Cash
-        billing_id = generate_billing_no()
-        b_nums = booking.payment_details.get("billing_numbers", [])
-        if not isinstance(b_nums, list): b_nums = []
-        if billing_id not in b_nums: b_nums.append(billing_id)
+        # Set status to pending with empty billing numbers until payment is made
         booking.payment_details = {
             "amount": float(booking.payment_details.get("amount", 0)),
             "status": "pending",
-            "billing_numbers": b_nums
+            "billing_numbers": []
         }
         booking.lastmodified_by = str(auth_user_id)
         booking.lastmodified_date = timezone.now()
         booking.save()
-
-        Billing.objects.create(
-            booking=booking,
-            billing_no=billing_id,
-            amount_paid=0, # Paid 0 initially for Pay at Hotel
-            payment_type="cash",
-            created_by=str(auth_user_id)
-        )
         
         # Send WhatsApp Confirmation
         send_booking_confirmation(booking)
         
+        try:
+            from .notifications import broadcast_booking_notification
+            broadcast_booking_notification()
+        except Exception as e:
+            print(f"Error broadcasting booking SSE: {e}")
+            
         return Response({"message": "Booking confirmed with Cash payment", "booking": BookingSerializer(booking).data}, status=status.HTTP_200_OK)
     except Booking.DoesNotExist:
         return Response({"error": "Booking not found"}, status=status.HTTP_404_NOT_FOUND)

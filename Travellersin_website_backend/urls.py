@@ -1,5 +1,5 @@
 from django.urls import path
-from .Views.rooms import rooms_list_create, room_detail_update, check_room_availability, get_room_bookings
+from .Views.rooms import rooms_list_create, room_detail_update, check_room_availability, get_room_bookings, get_menu_items
 from .Views.events import events_list_create, event_detail_update
 from .Views.queries import queries_list_create, query_detail_update
 from .Views.bookings import bookings_list_create, booking_detail_update, track_booking, cancel_booking
@@ -11,6 +11,7 @@ from .Views.adminpanel import (
     reject_cancellation, update_event_booking_status, 
     admin_room_availability, update_room_availability_status, billing_history
 )
+from .Views.notifications import notification_stream, admin_notifications
 from .Views.auth import customer_signup, customer_login, admin_login, get_user_profile, google_auth, update_user_profile
 from .Views.payments import create_razorpay_order, verify_payment, confirm_cash_booking, initiate_booking_payment
 from .Views.media import upload_room_image, serve_gridfs_file
@@ -19,6 +20,9 @@ from .Views.event_bookings import event_bookings_list_create, track_event_bookin
 from .Views.GalleryView import gallery_list_create, gallery_detail_update_delete, category_list_create, category_detail_delete
 
 urlpatterns = [
+    # Menu Items
+    path("menu-items/", get_menu_items),
+
     # Customers
     path("customers/", customers_list_create),
     path("customers/<str:customer_id>/", customer_detail_update),
@@ -57,6 +61,8 @@ urlpatterns = [
 
     # Admin
     path("admin/dashboard/", admin_dashboard),
+    path("admin/notifications/stream/", notification_stream),
+    path("admin/notifications/", admin_notifications),
     path("admin/room-availability/", admin_room_availability),
     path("admin/room-availability/update-status/", update_room_availability_status),
     path("admin/booking/<str:booking_id>/", update_booking_status),

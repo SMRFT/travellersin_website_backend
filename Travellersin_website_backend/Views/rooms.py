@@ -49,6 +49,27 @@ def room_detail_update(request, room_number):
         room.delete()
         return Response({"message": "Room deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
         
+def parse_dt(val_str):
+    if not val_str:
+        return None
+    from datetime import datetime
+    s = str(val_str).strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            if timezone.is_naive(dt):
+                dt = timezone.make_aware(dt)
+            return dt
+        except Exception:
+            pass
+    try:
+        dt = datetime.fromisoformat(s)
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt)
+        return dt
+    except Exception:
+        return None
+
 @api_view(["GET"])
 @permission_classes([PublicOrHasRolePermission])
 def check_room_availability(request):
@@ -60,38 +81,42 @@ def check_room_availability(request):
         return Response({"error": "Missing parameters"}, status=400)
 
     try:
-        check_in = parse_datetime(check_in_str)
-        check_out = parse_datetime(check_out_str)
+        check_in = parse_dt(check_in_str)
+        check_out = parse_dt(check_out_str)
         
         if not check_in or not check_out:
             return Response({"error": "Invalid date format"}, status=400)
 
         rooms_list = [r.strip() for r in room_numbers.split(",")]
         
+        now_dt = timezone.now()
+        from datetime import timedelta
+        is_immediate = (check_in <= now_dt)
+        recent_threshold = now_dt - timedelta(days=2)
+        all_recent_bookings = list(Booking.objects.all().order_by('-created_date')[:100])
+
         is_available = True
         conflicts = []
 
         for room_no in rooms_list:
             try:
                 room_obj = Rooms.objects.get(room_number=room_no)
-                if getattr(room_obj, 'status', 'active') == "maintenance" or getattr(room_obj, 'is_active', True) is False:
-                    is_available = False
+                if getattr(room_obj, 'status', 'active') in ["maintenance", "inactive"] or getattr(room_obj, 'is_active', True) is False:
                     conflicts.append(room_no)
                     continue
             except Rooms.DoesNotExist:
-                is_available = False
                 conflicts.append(room_no)
                 continue
 
-            # Check overlap against bookings using both room_details and room_numbers
-            candidate_bookings = Booking.objects.filter(
-                check_in__lt=check_out,
-                check_out__gt=check_in,
-                booking_status__in=["confirmed", "pending", "checked_in", "checked in", "Confirmed", "Pending", "Checked In"]
-            )
-            
-            is_room_conflict = False
-            for b in candidate_bookings:
+            matched_booking = None
+            for b in all_recent_bookings:
+                b_st = str(b.booking_status or '').lower().replace('_', ' ').strip()
+                if b_st in ['checked out', 'cancelled', 'canceled']:
+                    continue
+                if b_st not in ['confirmed', 'checked in', 'pending', 'booked', 'pending confirmation']:
+                    continue
+
+                has_room = False
                 r_details = b.room_details or []
                 if isinstance(r_details, str):
                     try:
@@ -99,29 +124,44 @@ def check_room_availability(request):
                         r_details = json.loads(r_details)
                     except Exception:
                         r_details = []
-                
-                matched = False
-                for item in r_details:
-                    if isinstance(item, dict) and str(item.get('roomNo')).strip() == str(room_no).strip():
-                        if item.get('isActive', True) is not False:
-                            matched = True
-                            break
-                    elif str(item).strip() == str(room_no).strip():
-                        matched = True
-                        break
-                
-                if not matched and b.room_numbers:
-                    booked_rn = [r.strip() for r in str(b.room_numbers).strip(",").split(",") if r.strip()]
-                    if str(room_no).strip() in booked_rn:
-                        matched = True
 
-                if matched:
-                    is_room_conflict = True
+                for item in r_details:
+                    if isinstance(item, dict) and str(item.get('roomNo')).strip() == str(room_no).strip() and item.get('isActive', True):
+                        has_room = True
+                        break
+                    elif str(item).strip() == str(room_no).strip():
+                        has_room = True
+                        break
+                if not has_room and b.room_numbers:
+                    booked_rn = [r.strip() for r in str(b.room_numbers).strip(',').split(',') if r.strip()]
+                    if str(room_no).strip() in booked_rn:
+                        has_room = True
+
+                if not has_room:
+                    continue
+
+                is_overlapping = (b.check_in < check_out and b.check_out > check_in)
+                if b.check_out <= now_dt:
+                    is_inhouse = (b_st in ['checked in', 'occupied'] or (b.guest_check_in is not None and b.guest_check_out is None))
+                    if not is_inhouse:
+                        continue
+
+                is_inhouse_overstay = (
+                    is_immediate and
+                    b.guest_check_in is not None and
+                    b.guest_check_out is None and
+                    recent_threshold <= b.check_in <= now_dt and
+                    b.check_out <= now_dt
+                )
+
+                if is_overlapping or is_inhouse_overstay:
+                    matched_booking = b
                     break
 
-            if is_room_conflict:
-                is_available = False
+            if matched_booking:
                 conflicts.append(room_no)
+
+        is_available = len([r for r in rooms_list if r not in conflicts]) > 0
 
         return Response({
             "is_available": is_available,
@@ -172,4 +212,41 @@ def get_room_bookings(request, room_number):
         return Response({"booked_dates": booked_dates})
     except Exception as e:
         return Response({"error": str(e)}, status=400)
+
+
+@api_view(["GET"])
+@permission_classes([PublicOrHasRolePermission])
+def get_menu_items(request):
+    """
+    GET -> Fetch active menu items for Food & Dining selection
+    """
+    try:
+        from ..models import MenuItems
+        from ..serializers import MenuItemSerializer
+        items = MenuItems.objects.filter(is_active=True).order_by("item_id")
+        serializer = MenuItemSerializer(items, many=True)
+        return Response(serializer.data)
+    except Exception as e:
+        # Fallback to direct pymongo query if needed
+        try:
+            import os
+            import dotenv
+            from pymongo import MongoClient
+            dotenv.load_dotenv()
+            mongo_uri = os.getenv('GLOBAL_DB_HOST', 'mongodb://localhost:27017/')
+            db_name = os.getenv('TIWEB_DB_NAME', 'TravellersIN_Website')
+            client = MongoClient(mongo_uri)
+            db = client[db_name]
+            docs = list(db['Travellersin_website_backend_menuitems'].find({"is_active": True}))
+            result = []
+            for d in docs:
+                result.append({
+                    "item_id": d.get("item_id"),
+                    "item_name": d.get("item_name"),
+                    "rate": float(str(d.get("rate", 0))),
+                    "is_active": d.get("is_active", True)
+                })
+            return Response(result)
+        except Exception as e2:
+            return Response({"error": str(e2)}, status=400)
 
